@@ -1,0 +1,30 @@
+name: HandArmMultiObjectManipulation
+
+physics_engine: ${..physics_engine}
+#full_experiment_name: ${..experiment}
+#test: ${..test}
+
+sim:
+    use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
+    up_axis: "z"
+    dt: 0.016666667  # required, but overridden in DexterityBase.yaml
+    gravity: [0.0, 0.0, -9.81]  # required, but overridden in base DexterityBase.yaml
+    disable_gravity: False
+    #contact_collection: 0
+
+env:
+    numEnvs: ${resolve_default:16384,${...num_envs}}
+    numObservations: 1  # overwritten depending on observations
+    numActions: 1  # overwritten depending on robot configuration
+
+
+rl:
+    # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
+    # 'lift' requires the policy to move the object to a height of 0.3m.
+    # 'reposition' requires the policy to move the object to a different position.
+    # 'oriented_reposition' requires the policy to move the object to a different position and achieve a specific orientation of the robot hand relative to the object, for example, held from above, held from the left, etc..
+    # 'd' requires the policy to move the object such that it follows a specific trajectory.
+    # 'throw' requires the policy to throw the object into a target bin.
+    goal: 'oriented_reposition'
+    goal_threshold: 0.05
+    max_episode_length: 200

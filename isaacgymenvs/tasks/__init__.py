@@ -57,6 +57,9 @@ from .industreal.industreal_task_pegs_insert import IndustRealTaskPegsInsert
 from .industreal.industreal_task_gears_insert import IndustRealTaskGearsInsert
 
 
+from .hand_arm.task.multi_object_manipulation import HandArmTaskMultiObjectManipulation
+
+
 def resolve_allegro_kuka(cfg, *args, **kwargs):
     subtask_name: str = cfg["env"]["subtask"]
     subtask_map = dict(
@@ -108,6 +111,7 @@ isaacgym_task_map = {
     "Humanoid": Humanoid,
     "HumanoidAMP": HumanoidAMP,
     "Ingenuity": Ingenuity,
+    "HandArmMultiObjectManipulation": HandArmTaskMultiObjectManipulation,
     "Quadcopter": Quadcopter,
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,
