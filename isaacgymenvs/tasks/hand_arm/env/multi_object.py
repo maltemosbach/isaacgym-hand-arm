@@ -94,7 +94,7 @@ class HandArmEnvMultiObject(HandArmBase):
         cfg_env = hydra.compose(config_name=self._env_cfg_path)['task']
         
         if cfg_env.bin.asset == 'no_bin':
-            self.bin_info = {"extent": [[-0.15, -0.15, 0.0], [0.15, 0.15, 0.15]]}
+            self.bin_info = {"extent": [[-0.25, -0.25, 0.0], [0.25, 0.25, 0.2]]}
         else:
             assert False
 
@@ -173,7 +173,7 @@ class HandArmEnvMultiObject(HandArmBase):
         upper = gymapi.Vec3(self.cfg_base.sim.env_spacing, self.cfg_base.sim.env_spacing, self.cfg_base.sim.env_spacing)
         num_per_row = int(np.sqrt(self.num_envs))
 
-        robot_asset = self._acquire_robot()
+        self._acquire_robot()
         self._acquire_objects()
 
         self.robot_handles = []
@@ -203,12 +203,12 @@ class HandArmEnvMultiObject(HandArmBase):
             objects_rigid_shape_count = sum([o.rigid_shape_count for o in [self.objects[i] for i in object_indices]])
 
             # Aggregate all actors.
-            max_rigid_bodies = self.gym.get_asset_rigid_body_count(robot_asset) + objects_rigid_body_count
-            max_rigid_shapes = self.gym.get_asset_rigid_shape_count(robot_asset) + objects_rigid_shape_count
+            max_rigid_bodies = self.robot.rigid_body_count + objects_rigid_body_count
+            max_rigid_shapes = self.robot.rigid_shape_count + objects_rigid_shape_count
             self.gym.begin_aggregate(env_ptr, max_rigid_bodies, max_rigid_shapes, True)
 
             # Create robot actor.
-            robot_handle = self.gym.create_actor(env_ptr, robot_asset, gymapi.Transform(), 'robot', env_index, 0, 1)
+            robot_handle = self.robot.create_actor(env_ptr, env_index)
             self.robot_handles.append(robot_handle)
             self.robot_actor_indices.append(actor_count)
             actor_count += 1

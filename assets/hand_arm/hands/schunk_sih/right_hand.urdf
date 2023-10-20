@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<robot name="schunk_sih">
+
+  <!-- Palm -->
+  <link name="palm_link">
+    <visual>
+      <geometry>
+        <mesh filename="assets/visual/palm.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.009300 0 -0.0475"/>
+      <geometry>
+        <box size="0.0408 0.1130 0.095"/>
+      </geometry>
+    </collision>
+  </link>
+  
+  <!-- Index -->
+  <link name="if_proximal">
+    <visual>
+      <geometry>
+        <mesh filename="assets/visual/if_proximal.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <origin xyz="-0.0435 0 -0.141"/>
+    </visual>
+  </link>
+  <link name="if_distal">
+    <visual>
+      <geometry>
+        <mesh filename="assets/visual/if_distal.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <origin xyz="-0.0435 0 -0.189"/>
+    </visual>
+  </link>
+  
+  <joint name="palm_to_if_proximal" type="revolute">
+        <parent link="palm_link"/>
+        <child link="if_proximal"/>
+        <origin xyz="0.0435 0 0.141"/>
+        <axis xyz="1 0 0"/>
+        <limit effort="330.0" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
+        <dynamics damping="0.1" friction="0"/>
+  </joint>
+  <joint name="if_proximal_to_if_distal" type="revolute">
+        <parent link="if_proximal"/>
+        <child link="if_distal"/>
+        <origin xyz="0 0 0.048"/>
+        <axis xyz="1 0 0"/>
+        <limit effort="330.0" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
+        <dynamics damping="0.1" friction="0"/>
+  </joint>
+</robot>

@@ -31,7 +31,7 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         if self.objects_dropped:
             self._reset_objects(env_ids)
         else:
-            self._reset_robot(env_ids, reset_dof_pos=[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
+            self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.bringup)
             self._disable_object_collisions(object_ids=range(self.cfg_env.objects.num_objects))
             self._place_objects_before_bin()
             self._drop_objects(env_ids)
@@ -39,16 +39,11 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             self._reset_objects(env_ids)
 
         #self._reset_goal(env_ids)
-        self._reset_robot(env_ids, reset_dof_pos=[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
-
-        # Initialize SAM segmentation at the start of each episode.
-        if any(obs.startswith("detected_pointcloud") for obs in self.cfg["env"]["observations"]):
-            self._reset_segmentation_tracking(env_ids)
-        
-        self._reset_buffers(env_ids, prefix="target_")
+        self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.reset)
+        self._reset_buffers(env_ids)
 
     def _reset_objects(self, env_ids):
-        for i, object_index in enumerate(self.object_actor_indices):
+        for i, object_index in enumerate(self.object_actor_env_indices):
             self.root_pos[env_ids, object_index] = self.object_pos_initial[env_ids, i]
             self.root_quat[env_ids, object_index] = self.object_quat_initial[env_ids, i]
             self.root_linvel[env_ids, object_index] = 0.0
@@ -69,13 +64,10 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         #     reset_indices = torch.cat((self.object_actor_ids_sim[env_ids].to(torch.int32).flatten(), self.goal_actor_ids_sim[env_ids].to(torch.int32)))
         # else:
             
-        reset_indices = self.object_actor_ids_sim[env_ids].to(torch.int32)
-
+        reset_indices = self.object_actor_indices[env_ids]
         self.gym.set_actor_root_state_tensor_indexed(
-            self.sim,
-            gymtorch.unwrap_tensor(self.root_state),
-            gymtorch.unwrap_tensor(reset_indices),
-            len(reset_indices))
+            self.sim, gymtorch.unwrap_tensor(self.root_state), gymtorch.unwrap_tensor(reset_indices), len(reset_indices)
+        )
 
     def _drop_objects(self, env_ids):
         all_env_ids = env_ids.clone()
@@ -168,3 +160,12 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         rand_floats = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=self.device)
         object_quat = randomize_rotation(rand_floats[:, 0], rand_floats[:, 1], x_unit_tensor, y_unit_tensor)
         return object_quat
+    
+
+    def _update_reset_buf(self):
+        self.reset_buf[:] = torch.where(
+            self.progress_buf[:] >= self.max_episode_length, torch.ones_like(self.reset_buf), self.reset_buf
+        )
+
+    def _update_rew_buf(self):
+        pass

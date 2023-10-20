@@ -1,19 +1,16 @@
 asset:
-  arm: "arms/ur5/ur5.urdf"
-  hand: "hands/schunk_sih/right_hand.urdf"
+  robot: "robot/hand_arm.urdf"
 
   dof_properties:
-    arm:
-      prop_gain: 40
-      deriv_gain: 8
-      max_effort: 100.
-    hand:
-      prop_gain: 10.
-      deriv_gain: 4
-      max_effort: 0.5
+    prop_gain: [120., 120., 120., 120., 120., 120., 40., 40., 40., 40., 40., 40., 40., 40., 40., 40., 40.]
+    deriv_gain: [6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6.]
+
+  joint_configurations:
+    bringup: [0., -1.571, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., -1.571, 0., 0.]
+    reset: [0.6985, -1.4106, 1.2932, 0.1174, 0.6983, 1.5708, 0., 0., 0., 0., 0., 0., 0., 0., -1.571, 0., 0.]
 
 control:
-  model: "relative"  # Options: {'absolute', 'relative'}.
+  mode: "relative"  # Options: {'absolute', 'relative'}.
   type: "joint"  # Options: {'joint', 'end_effector'}.
 
   joint:

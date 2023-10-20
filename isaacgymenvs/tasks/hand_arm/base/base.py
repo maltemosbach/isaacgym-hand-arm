@@ -2,26 +2,26 @@ import hydra
 from omegaconf import DictConfig
 from isaacgym import gymapi, gymtorch, torch_utils
 from isaacgymenvs.tasks.base.vec_task import VecTask
-from isaacgymenvs.tasks.hand_arm.urdf.urdf import HandArmURDF
-import torch
-from isaacgym import gymapi, gymtorch, torch_utils
 from isaacgym.torch_utils import *
 from typing import *
-from urdfpy import URDF
-import os
 
 
 class HandArmBase(VecTask):
     _asset_root = '../assets/hand_arm/'
     _base_cfg_path = 'task/HandArmBase.yaml'
 
+    arm_dof_count = 6
+
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg_base = self._acquire_base_cfg()
+
+        
 
         if self.cfg_base.ros.activate:
             self._acquire_ros_interface()
         
         self.cfg = cfg
+        self.cfg["env"]["numActions"] = 11
         self.headless = headless
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
@@ -36,34 +36,8 @@ class HandArmBase(VecTask):
         return hydra.compose(config_name=self._base_cfg_path)['task']
     
     def _acquire_robot(self):
-        robot_options = gymapi.AssetOptions()
-        robot_options.fix_base_link = True
-        robot_options.use_mesh_materials = True
-        robot_asset = self.gym.load_asset(self.sim, self._asset_root, 'robot/hand_arm.urdf', robot_options)
-
-        robot_urdf = URDF.load(os.path.join(self._asset_root, 'robot/hand_arm.urdf'))
-
-        print("robot_urdf:", robot_urdf)
-
-        actuated_dof_names = [j.name for j in robot_urdf.actuated_joints]
-        self.actuated_dof_indices = [self.gym.find_asset_dof_index(robot_asset, name) for name in actuated_dof_names]
-
-        self.robot_dof_count = self.gym.get_asset_dof_count(robot_asset)
-        self.robot_actuator_count = self.gym.get_asset_actuator_count(robot_asset)
-        robot_rigid_body_count = self.gym.get_asset_rigid_body_count(robot_asset)
-        robot_rigid_body_names = [self.gym.get_asset_rigid_body_name(robot_asset, i) for i in range(robot_rigid_body_count)]
-
-        robot_dof_props = self.gym.get_asset_dof_properties(robot_asset)
-        self.robot_dof_lower_limits = []
-        self.robot_dof_upper_limits = []
-        for i in range(self.robot_dof_count):
-            self.robot_dof_lower_limits.append(robot_dof_props["lower"][i])
-            self.robot_dof_upper_limits.append(robot_dof_props["upper"][i])
-
-        self.robot_dof_lower_limits = to_torch(self.robot_dof_lower_limits, device=self.device)
-        self.robot_dof_upper_limits = to_torch(self.robot_dof_upper_limits, device=self.device)
-
-        return robot_asset
+        from isaacgymenvs.tasks.hand_arm.utils import HandArmRobot
+        self.robot = HandArmRobot(self.gym, self.sim, self._asset_root, self.cfg_base, self.device)
         
     def acquire_base_tensors(self):
         """Acquire and wrap tensors. Create views."""
@@ -108,11 +82,12 @@ class HandArmBase(VecTask):
         self.contact_force = self.contact_force.view(self.num_envs, self.num_bodies, 3)[..., 0:3]
 
         # Initialize torque or position targets for all DoFs
-        self.dof_pos_targets = torch.zeros((self.num_envs, self.robot_dof_count), device=self.device)
-        self.actuated_dof_pos_targets = torch.zeros((self.num_envs, self.robot_actuator_count), device=self.device)
+        self.current_dof_pos_targets = torch.zeros((self.num_envs, self.robot.dof_count), device=self.device)
+        self.previous_dof_pos_targets = torch.zeros((self.num_envs, self.robot.dof_count), device=self.device)
+        self.actuated_dof_pos_targets = torch.zeros((self.num_envs, self.robot.actuator_count), device=self.device)
 
-        self.actuated_dof_pos = self.dof_pos[:, self.actuated_dof_indices]
-        self.actuated_dof_vel = self.dof_vel[:, self.actuated_dof_indices]
+        self.actuated_dof_pos = self.dof_pos[:, self.robot.actuated_dof_indices]
+        self.actuated_dof_vel = self.dof_vel[:, self.robot.actuated_dof_indices]
 
 
 
@@ -179,11 +154,68 @@ class HandArmBase(VecTask):
 
         #self.reset_target_pose(reset_goal_env_ids)
 
+        self.actions = actions.clone().to(self.device) * 0.
+
+
+        # actions 0-6 arm arm DoFs. 6 is thumb opposition 7 is thumb flextion 8 is index finger 9 is middle finger 10 is ring finger
+
+        self.actions[0, 6] = 0.1
+
+        print("actions.shape:", actions.shape)
+
+        print("actions.device:", actions.device)
+        print("self.current_dof_pos_targets:", self.current_dof_pos_targets.device)
+
+
+        if self.cfg_base.control.type == "joint":
+            joint_actions = self.robot.actuated_to_all(self.actions)
+            print("joint_actions:", joint_actions)
+
+            if self.cfg_base.control.mode == "absolute":
+                self.current_dof_pos_targets[:, :] = scale(
+                    joint_actions, self.robot.dof_lower_limits, self.robot.dof_upper_limits
+                )
+
+                self.current_dof_pos_targets[:, :] = (
+                    self.cfg_base.control.moving_average * self.current_dof_pos_targets
+                    + (1.0 - self.cfg_base.control.moving_average) * self.previous_dof_pos_targets
+                )
+            
+            elif self.cfg_base.control.mode == "relative":
+                self.current_dof_pos_targets[:, 0:self.arm_dof_count] = self.previous_dof_pos_targets[:, 0:self.arm_dof_count] + self.cfg_base.control.joint.arm_action_scale * self.dt * joint_actions[:, 0:self.arm_dof_count]
+                self.current_dof_pos_targets[:, self.arm_dof_count:] = self.previous_dof_pos_targets[:, self.arm_dof_count:] + self.cfg_base.control.joint.hand_action_scale * self.dt * joint_actions[:, self.arm_dof_count:]
+
+            else:
+                assert False
+
+            self.current_dof_pos_targets[:, :] = tensor_clamp(
+                self.current_dof_pos_targets, self.robot.dof_lower_limits, self.robot.dof_upper_limits
+            )
+            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.current_dof_pos_targets))
+            self.previous_dof_pos_targets[:, :] = self.current_dof_pos_targets[:, :]
+        
+        else:
+            assert False
+
+
+
+        print("self.progress_buf:", self.progress_buf)
+
         if len(reset_env_ids) > 0:
             self.reset_idx(reset_env_ids)
+
+
+    def compute_reward(self):
+        self._update_reset_buf()
+        self._update_rew_buf()
         
 
     def post_physics_step(self):
+        self.progress_buf[:] += 1
+
+
+        self.compute_reward()
+
         if len(self.cfg_base.debug.visualize) > 0 and not self.headless:
             self.gym.clear_lines(self.viewer)
             self.draw_visualizations(self.cfg_base.debug.visualize)
@@ -202,21 +234,25 @@ class HandArmBase(VecTask):
         assert len(env_ids) == self.num_envs, \
             "All environments should be reset simultaneously."
 
-        self.dof_pos[env_ids, :self.robot_dof_count] = torch.tensor(reset_dof_pos, device=self.device).unsqueeze(0).repeat((len(env_ids), 1))
-        self.dof_vel[env_ids, :self.robot_dof_count] = 0.0
-        self.dof_pos_targets[env_ids] = self.dof_pos[env_ids, :self.robot_dof_count]
+        self.dof_pos[env_ids, :self.robot.dof_count] = torch.tensor(reset_dof_pos, device=self.device).unsqueeze(0).repeat((len(env_ids), 1))
+        self.dof_vel[env_ids, :self.robot.dof_count] = 0.0
+        self.current_dof_pos_targets[env_ids] = self.dof_pos[env_ids, :self.robot.dof_count]
+        self.previous_dof_pos_targets[env_ids] = self.dof_pos[env_ids, :self.robot.dof_count]
         
         #self.actuated_dof_pos_targets[env_ids] = unscale(self.dof_pos[env_ids, :self.robot_dof_count], self.robot_dof_lower_limits, self.robot_dof_upper_limits)[:, self.actuated_dof_indices]
 
-        print("before setting dofs")
-        reset_indices = self.robot_actor_indices[env_ids].flatten()
+        reset_indices = self.robot_actor_indices[env_ids]
         self.gym.set_dof_position_target_tensor_indexed(
-            self.sim, gymtorch.unwrap_tensor(self.dof_pos_targets), gymtorch.unwrap_tensor(reset_indices), len(reset_indices)
+            self.sim, gymtorch.unwrap_tensor(self.current_dof_pos_targets), gymtorch.unwrap_tensor(reset_indices), len(reset_indices)
         )
 
         self.gym.set_dof_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(reset_indices), len(reset_indices)
         )
+
+    def _reset_buffers(self, env_ids) -> None:
+        self.reset_buf[env_ids] = 0
+        self.progress_buf[env_ids] = 0
 
 
     def draw_visualizations(self, visualizations: List[str]) -> None:
