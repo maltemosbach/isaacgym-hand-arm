@@ -450,6 +450,8 @@
       <origin xyz="0.0971 -0.024 -0.081"/>
     </collision>
   </link>
+  <link name="thumb_fingertip"/>
+
   <joint name="palm_to_th_proximal" type="revolute">
     <parent link="palm"/>
     <child link="th_proximal"/>
@@ -475,6 +477,12 @@
     <dynamics damping="0.1" friction="0"/>
     <mimic joint="th_proximal_to_th_inter" multiplier="1.0"/>
   </joint>
+  <joint name="th_distal_to_thumb_fingertip" type="fixed">
+    <parent link="th_distal"/>
+    <child link="thumb_fingertip"/>
+    <origin xyz="-0.023 0 0.015"/>
+  </joint>
+
   <!-- Index -->
   <link name="if_proximal">
     <visual>
@@ -528,6 +536,8 @@
       <origin xyz="-0.0435 0 -0.189"/>
     </collision>
   </link>
+  <link name="index_fingertip"/>
+
   <joint name="palm_to_if_proximal" type="revolute">
     <parent link="palm"/>
     <child link="if_proximal"/>
@@ -545,6 +555,13 @@
     <dynamics damping="0.1" friction="0"/>
     <mimic joint="palm_to_if_proximal" multiplier="1.0"/>
   </joint>
+  <joint name="if_distal_to_index_fingertip" type="fixed">
+    <parent link="if_distal"/>
+    <child link="index_fingertip"/>
+    <origin xyz="-0.087 0.0175 0.041"/>
+  </joint>
+
+
   <!-- Middle -->
   <link name="mf_proximal">
     <visual>
@@ -598,6 +615,8 @@
       <origin xyz="-0.0187 0 -0.1935"/>
     </collision>
   </link>
+  <link name="middle_fingertip"/>
+
   <joint name="palm_to_mf_proximal" type="revolute">
     <parent link="palm"/>
     <child link="mf_proximal"/>
@@ -615,6 +634,12 @@
     <dynamics damping="0.1" friction="0"/>
     <mimic joint="palm_to_mf_proximal" multiplier="1.0"/>
   </joint>
+  <joint name="mf_distal_to_middle_fingertip" type="fixed">
+    <parent link="mf_distal"/>
+    <child link="middle_fingertip"/>
+    <origin xyz="-0.0375 0.0175 0.049"/>
+  </joint>
+
   <!-- Ring -->
   <link name="rf_proximal">
     <visual>
@@ -668,6 +693,8 @@
       <origin xyz="0.0069 0 -0.182"/>
     </collision>
   </link>
+  <link name="ring_fingertip"/>
+
   <joint name="palm_to_rf_proximal" type="revolute">
     <parent link="palm"/>
     <child link="rf_proximal"/>
@@ -685,6 +712,12 @@
     <dynamics damping="0.1" friction="0"/>
     <mimic joint="palm_to_rf_proximal" multiplier="1.0"/>
   </joint>
+  <joint name="rf_distal_to_ring_fingertip" type="fixed">
+    <parent link="rf_distal"/>
+    <child link="ring_fingertip"/>
+    <origin xyz="0.014 0.0175 0.041"/>
+  </joint>
+
   <!-- Little -->
   <link name="lf_proximal">
     <visual>
@@ -738,6 +771,8 @@
       <origin xyz="0.032 0 -0.1655"/>
     </collision>
   </link>
+  <link name="little_fingertip"/>
+
   <joint name="palm_to_lf_proximal" type="revolute">
     <parent link="palm"/>
     <child link="lf_proximal"/>
@@ -756,6 +791,12 @@
     <dynamics damping="0.1" friction="0"/>
     <mimic joint="palm_to_rf_proximal" multiplier="1.0"/>
   </joint>
+  <joint name="lf_distal_to_little_fingertip" type="fixed">
+    <parent link="lf_distal"/>
+    <child link="little_fingertip"/>
+    <origin xyz="0.064 0.0175 0.034"/>
+  </joint>
+
   <!-- Thumb opposition -->
   <transmission name="thumb_opposition_transmission">
     <type>transmission_interface/SimpleTransmission</type>
