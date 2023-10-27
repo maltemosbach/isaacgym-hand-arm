@@ -4,6 +4,7 @@ physics_engine: ${..physics_engine}
 #full_experiment_name: ${..experiment}
 #test: ${..test}
 
+
 sim:
     use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
     up_axis: "z"
@@ -13,10 +14,17 @@ sim:
     #contact_collection: 0
 
 env:
+    enableCameraSensors: True  # Set to true to test visual observations
     numEnvs: ${resolve_default:16384,${...num_envs}}
     numObservations: 1  # overwritten depending on observations
     numActions: 1  # overwritten depending on robot configuration
-
+    controlFrequencyInv: 3
+    renderFPS: 120
+    
+    proprioceptive_observations: ['actuated_dof_pos', 'actuated_dof_vel', 'fingertip_pos', 'fingertip_quat']
+    object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box', 'fingertip_to_target_object_pos', 'target_object_to_goal_pos']
+    progress_observations: ['fingertip_closest_distance', 'object_lifted_before']
+    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations}}
 
 rl:
     # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
@@ -25,6 +33,25 @@ rl:
     # 'oriented_reposition' requires the policy to move the object to a different position and achieve a specific orientation of the robot hand relative to the object, for example, held from above, held from the left, etc..
     # 'd' requires the policy to move the object such that it follows a specific trajectory.
     # 'throw' requires the policy to throw the object into a target bin.
-    goal: 'oriented_reposition'
+    goal: 'reposition'
     goal_threshold: 0.05
-    max_episode_length: 200
+    
+
+    reward:
+        reaching: 1.0
+        lifting: 5.0
+        goal: 25.0
+
+        #object_velocity_penalty: 5.0
+        #dof_velocity_penalty: 5.0
+        #fingertip_progression: 50.0
+        #goal_progression: 250
+        #success_bonus: 1000.
+
+
+    lifting_threshold: 0.05
+
+
+    reset:
+        max_episode_length: 200
+        reset_reached_goal: False

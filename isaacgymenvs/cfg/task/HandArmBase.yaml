@@ -1,9 +1,9 @@
 asset:
-  robot: "robot/hand_arm.urdf"
+  robot: "robot/hand_arm_collision_is_visual.urdf"
 
   dof_properties:
     prop_gain: [120., 120., 120., 120., 120., 120., 40., 40., 40., 40., 40., 40., 40., 40., 40., 40., 40.]
-    deriv_gain: [6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6.]
+    deriv_gain: [20., 20., 20., 20., 20., 20., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6., 6.]
 
   joint_configurations:
     bringup: [0., -1.571, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., -1.571, 0., 0.]
@@ -14,11 +14,11 @@ control:
   type: "joint"  # Options: {'joint', 'end_effector'}.
 
   joint:
-    arm_action_scale: 0.25  # For relative control arm joint targets will be set to current_joint_target + delta_t_control * arm_action_scale * action.
+    arm_action_scale: 1.5  # For relative control arm joint targets will be set to current_joint_target + delta_t_control * arm_action_scale * action.
     hand_action_scale: 5.0  # For relative control hand joint targets will be set to current_joint_target + delta_t_control * hand_action_scale * action.
 
   end_effector:
-    end_effector_body: "tracker"  # Name of the body to be positioned via inverse kinematics.
+    body_name: "flange"  # Name of the body to be positioned via inverse kinematics.
     pos_action_scale: [0.15, 0.15, 0.15]  # For relative control position targets will be set to current_target + delta_t_control * pos_action_scale * action.
     rot_action_scale: [0.2, 0.2, 0.2]  # For relative control rotation targets will be set to current_target + delta_t_control * rot_action_scale * action.
 
@@ -27,7 +27,7 @@ debug:
     save_recordings: True
     write_frames_every: 'step'  # Options {'dt', 'step'}.
 
-  visualize: ['bin_extent']
+  visualize: ['bin_extent', 'contact_force']
 
 logging:
   wandb:

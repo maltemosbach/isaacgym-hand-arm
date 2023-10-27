@@ -125,12 +125,6 @@
         <color rgba="0.7 0.7 0.7 1.0"/>
       </material>
     </visual>
-    <collision>
-      <origin rpy="0 0 3.141592653589793" xyz="0 0 0"/>
-      <geometry>
-        <mesh filename="meshes/ur5/collision/base.stl"/>
-      </geometry>
-    </collision>
     <inertial>
       <mass value="4.0"/>
       <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -258,12 +252,6 @@
         <color rgba="0.7 0.7 0.7 1.0"/>
       </material>
     </visual>
-    <collision>
-      <origin rpy="1.5707963267948966 0 0" xyz="0 0 -0.0818"/>
-      <geometry>
-        <mesh filename="meshes/ur5/collision/wrist3.stl"/>
-      </geometry>
-    </collision>
     <inertial>
       <mass value="0.1879"/>
       <origin rpy="0 0 0" xyz="0.0 0.0 -0.01525"/>

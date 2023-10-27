@@ -208,6 +208,16 @@ class RLGPUAlgoObserver(AlgoObserver):
             self.writer.add_scalar(f'{k}/iter', v, epoch_num)
             self.writer.add_scalar(f'{k}/time', v, total_time)
 
+        # Log custom data to tensorboard.
+        if hasattr(self.algo.vec_env.env, "log_data"):
+            for k, v in self.algo.vec_env.env.log_data.items():
+                self.writer.add_scalar(k + '/frame', v, frame)
+                self.writer.add_scalar(k + '/iter', v, epoch_num)
+                self.writer.add_scalar(k + '/time', v, total_time)
+
+            # clear dict of values to log
+            self.algo.vec_env.env.log_data = {}
+
 
 class MultiObserver(AlgoObserver):
     """Meta-observer that allows the user to add several observers."""
