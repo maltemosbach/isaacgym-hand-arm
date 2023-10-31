@@ -22,16 +22,17 @@ env:
     renderFPS: 120
     
     proprioceptive_observations: ['actuated_dof_pos', 'actuated_dof_vel', 'fingertip_pos', 'fingertip_quat']
-    object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box', 'fingertip_to_target_object_pos', 'target_object_to_goal_pos']
-    progress_observations: ['fingertip_closest_distance', 'object_lifted_before']
-    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations}}
+    object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box' ]
+    task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos', ]
+    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
+
+    #observations: ["actuated_dof_pos", "actuated_dof_vel", "fingertip_pos", "fingertip_quat", "object_pos", "object_bounding_box", "target_object_bounding_box", "fingertip_to_target_object_pos", "target_object_to_goal_pos"]
 
 rl:
     # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
     # 'lift' requires the policy to move the object to a height of 0.3m.
     # 'reposition' requires the policy to move the object to a different position.
     # 'oriented_reposition' requires the policy to move the object to a different position and achieve a specific orientation of the robot hand relative to the object, for example, held from above, held from the left, etc..
-    # 'd' requires the policy to move the object such that it follows a specific trajectory.
     # 'throw' requires the policy to throw the object into a target bin.
     goal: 'reposition'
     goal_threshold: 0.05
@@ -40,7 +41,8 @@ rl:
     reward:
         reaching: 1.0
         lifting: 5.0
-        goal: 25.0
+        goal: 50.0
+        success: 100.0
 
         #object_velocity_penalty: 5.0
         #dof_velocity_penalty: 5.0

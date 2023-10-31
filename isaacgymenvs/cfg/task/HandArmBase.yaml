@@ -27,7 +27,7 @@ debug:
     save_recordings: True
     write_frames_every: 'step'  # Options {'dt', 'step'}.
 
-  visualize: ['bin_extent', 'contact_force']
+  visualize: ['bin_extent']
 
 logging:
   wandb:

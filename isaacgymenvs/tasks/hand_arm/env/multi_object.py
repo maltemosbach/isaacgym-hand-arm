@@ -1,7 +1,7 @@
 
 from isaacgym import gymapi, gymutil
 from isaacgymenvs.tasks.hand_arm.base.base import HandArmBase
-from isaacgymenvs.tasks.hand_arm.base.observations import Observation
+from isaacgymenvs.tasks.hand_arm.base.observations import Callback, PointcloudObservation, VectorObservation
 import hydra
 from omegaconf import DictConfig
 import numpy as np
@@ -14,7 +14,131 @@ import random
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from isaacgym.torch_utils import quat_apply, quat_mul
+from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate
+
+
+def generate_cuboid_bin_urdf(height, depth_width, file_path):
+    urdf_template = f'''
+    <?xml version="1.0"?>
+    <robot name="cuboid_bin">
+
+      <!-- Materials -->
+      <material name="blue">
+        <color rgba="0 0 1 1"/>
+      </material>
+
+      <!-- Links -->
+      <link name="base_link"/>
+
+      <link name="floor">
+            <visual>
+            <geometry>
+                <box size="{depth_width} {depth_width} 0.01"/>
+            </geometry>
+            <material name="blue"/>
+            </visual>
+            <collision>
+            <geometry>
+                <box size="{depth_width} {depth_width} 0.01"/>
+            </geometry>
+            </collision>
+        </link>
+
+      <link name="left_wall">
+            <visual>
+            <geometry>
+                <box size="0.01 {depth_width} {height}"/>
+            </geometry>
+            <material name="blue"/>
+            </visual>
+            <collision>
+            <geometry>
+                <box size="0.01 {depth_width} {height}"/>
+            </geometry>
+            </collision>
+        </link>
+
+        <link name="right_wall">
+            <visual>
+            <geometry>
+                <box size="0.01 {depth_width} {height}"/>
+            </geometry>
+            <material name="blue"/>
+            </visual>
+            <collision>
+            <geometry>
+                <box size="0.01 {depth_width} {height}"/>
+            </geometry>
+            </collision>
+        </link>
+
+        <link name="front_wall">
+            <visual>
+            <geometry>
+                <box size="{depth_width} 0.01 {height}"/>
+            </geometry>
+            <material name="blue"/>
+            </visual>
+            <collision>
+            <geometry>
+                <box size="{depth_width} 0.01 {height}"/>
+            </geometry>
+            </collision>
+        </link>
+
+        <link name="back_wall">
+            <visual>
+            <geometry>
+                <box size="{depth_width} 0.01 {height}"/>
+            </geometry>
+            <material name="blue"/>
+            </visual>
+            <collision>
+            <geometry>
+                <box size="{depth_width} 0.01 {height}"/>
+            </geometry>
+            </collision>
+        </link>
+
+
+      <!-- Joints -->
+      <joint name="floor_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="floor"/>
+        <origin xyz="0 0 {-height/2}" rpy="0 0 0"/>
+      </joint>
+
+      <joint name="left_wall_joint" type="fixed">
+            <parent link="floor"/>
+            <child link="left_wall"/>
+            <origin xyz="-{depth_width/2 + 0.005} 0 {height/2}" rpy="0 0 0"/>
+        </joint>
+
+        <joint name="right_wall_joint" type="fixed">
+            <parent link="floor"/>
+            <child link="right_wall"/>
+            <origin xyz="{depth_width/2 + 0.005} 0 {height/2}" rpy="0 0 0"/>
+        </joint>
+
+        <joint name="front_wall_joint" type="fixed">
+            <parent link="floor"/>
+            <child link="front_wall"/>
+            <origin xyz="0 {depth_width/2 + 0.005} {height/2}" rpy="0 0 0"/>
+        </joint>
+
+        <joint name="back_wall_joint" type="fixed">
+            <parent link="floor"/>
+            <child link="back_wall"/>
+            <origin xyz="0 -{depth_width/2 + 0.005} {height/2}" rpy="0 0 0"/>
+        </joint>
+
+    </robot>
+    '''
+
+    urdf_string = urdf_template.format(height=height, depth_width=depth_width)
+
+    with open(file_path, 'w') as f:
+        f.write(urdf_string)
 
 
 class ObjectAsset:
@@ -80,6 +204,29 @@ class ObjectAsset:
             self.acquire_mesh()
         to_origin, extents = trimesh.bounds.oriented_bounds(self.mesh)
         return to_origin, extents
+    
+    def create_actor(self, env_ptr, group: int, filter: int, segmentationId: int) -> None:
+        actor_handle = self._gym.create_actor(env_ptr, self.asset, self.start_pose, self.name, group, filter, segmentationId)
+
+        if not hasattr(self, "rigid_body_properties"):
+            rigid_body_properties = self._gym.get_actor_rigid_body_properties(env_ptr, actor_handle)
+            assert len(rigid_body_properties) == 1, "Multiple rigid body properties in object asset."
+            self.rigid_body_properties = rigid_body_properties[0]
+        return actor_handle
+    
+    @property
+    def mass(self) -> float:
+        return self.rigid_body_properties.mass
+
+    @property
+    def com(self) -> gymapi.Vec3:
+        return self.rigid_body_properties.com
+
+    @property
+    def inertia(self) -> gymapi.Mat33:
+        return self.rigid_body_properties.inertia
+
+
 
 
 class HandArmEnvMultiObject(HandArmBase):
@@ -91,160 +238,250 @@ class HandArmEnvMultiObject(HandArmBase):
 
     def register_observations(self) -> None:
         super().register_observations()
+
+        # Register object pose and velocity observations.
         self.register_observation(
-            'object_pos',
-            Observation(
-                size=(self.cfg_env.objects.num_objects * 3,),
-                data=lambda: self.object_pos.flatten(1, 2),
-                is_mandatory=True,  # Required to save initial object pose.
-                acquire=lambda: setattr(self, "object_pos", self.root_pos[:, self.object_actor_env_indices, 0:3]),
-                refresh=lambda: self.object_pos.copy_(self.root_pos[:, self.object_actor_env_indices, 0:3]),
+            "object_pos", 
+            VectorObservation(
+                size=(3 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_pos.flatten(1, 2),
+                is_mandatory=True,  # NOTE: Required to save initial object poses and compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "object_pos", self.root_pos[:, self.object_actor_env_indices, 0:3]),
+                    on_step=lambda: self.object_pos.copy_(self.root_pos[:, self.object_actor_env_indices, 0:3]),
+                ),
                 visualize=lambda: self.visualize_poses(self.object_pos, self.object_quat),
             )
         )
         self.register_observation(
-            'object_quat',
-            Observation(
-                size=(self.cfg_env.objects.num_objects * 4,),
-                data=lambda: self.object_quat.flatten(1, 2),
-                is_mandatory=True,  # Required to save initial object pose.
-                acquire=lambda: setattr(self, "object_quat", self.root_quat[:, self.object_actor_env_indices, 0:4]),
-                refresh=lambda: self.object_quat.copy_(self.root_quat[:, self.object_actor_env_indices, 0:4]),
-                visualize=lambda: self.visualize_poses(self.object_pos, self.object_quat), 
+            "object_quat", 
+            VectorObservation(
+                size=(4 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_quat.flatten(1, 2),
+                is_mandatory=True,  # NOTE: Required to save initial object poses and compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "object_quat", self.root_quat[:, self.object_actor_env_indices, 0:4]),
+                    on_step=lambda: self.object_quat.copy_(self.root_quat[:, self.object_actor_env_indices, 0:4]),
+                ),
+                visualize=lambda: self.visualize_poses(self.object_pos, self.object_quat),
             )
         )
         self.register_observation(
-            'object_linvel',
-            Observation(
-                size=(self.cfg_env.objects.num_objects * 3,),
-                data=lambda: self.object_linvel.flatten(1, 2),
-                is_mandatory=True,  # Required to compute rewards.
-                acquire=lambda: setattr(self, "object_linvel", self.root_linvel[:, self.object_actor_env_indices, 0:3]),
-                refresh=lambda: self.object_linvel.copy_(self.root_linvel[:, self.object_actor_env_indices, 0:3]),
+            "object_linvel", 
+            VectorObservation(
+                size=(3 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_linvel.flatten(1, 2),
+                is_mandatory=True,  # NOTE: Required to compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "object_linvel", self.root_linvel[:, self.object_actor_env_indices, 0:3]),
+                    on_step=lambda: self.object_linvel.copy_(self.root_linvel[:, self.object_actor_env_indices, 0:3]),
+                )
             )
         )
         self.register_observation(
-            'object_angvel',
-            Observation(
-                size=(self.cfg_env.objects.num_objects * 3,),
-                data=lambda: self.object_angvel.flatten(1, 2),
-                acquire=lambda: setattr(self, "object_angvel", self.root_angvel[:, self.object_actor_env_indices, 0:3]),
-                refresh=lambda: self.object_angvel.copy_(self.root_angvel[:, self.object_actor_env_indices, 0:3]),
+            "object_angvel", 
+            VectorObservation(
+                size=(3 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_angvel.flatten(1, 2),
+                is_mandatory=True,  # NOTE: Required to compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "object_angvel", self.root_angvel[:, self.object_actor_env_indices, 0:3]),
+                    on_step=lambda: self.object_angvel.copy_(self.root_angvel[:, self.object_actor_env_indices, 0:3]),
+                )
             )
         )
 
+        # Register object physical properties observations.
         self.register_observation(
-            'target_object_pos',
-            Observation(
+            "object_mass", 
+            VectorObservation(
+                size=(self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_mass,
+                callback=Callback(
+                    on_init=self._acquire_object_mass,
+                )
+            )
+        )
+        self.register_observation(
+            "object_com", 
+            VectorObservation(
+                size=(3 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_com.flatten(1, 2),
+                callback=Callback(
+                    on_init=self._acquire_object_com,
+                )
+            )
+        )
+        self.register_observation(
+            "object_inertia", 
+            VectorObservation(
+                size=(9 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_inertia.flatten(1, 2),
+                callback=Callback(
+                    on_init=self._acquire_object_inertia,
+                )
+            )
+        )
+
+        # Register target object observations.
+        self.register_observation(
+            "target_object_pos", 
+            VectorObservation(
                 size=(3,),
-                data=lambda: self.target_object_pos,
-                is_mandatory=True,  # Required to compute reward and success criterion.
-                acquire=lambda: setattr(self, "target_object_pos", self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
-                refresh=lambda: self.target_object_pos.copy_(self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
+                as_tensor=lambda: self.target_object_pos,
+                is_mandatory=True,  # NOTE: Required to compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_pos", self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
+                    on_step=lambda: self.target_object_pos.copy_(self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
+                ),
                 visualize=lambda: self.visualize_poses(self.target_object_pos, self.target_object_quat),
             )
         )
         self.register_observation(
-            'target_object_quat',
-            Observation(
+            "target_object_quat", 
+            VectorObservation(
                 size=(4,),
-                data=lambda: self.target_object_quat,
-                acquire=lambda: setattr(self, "target_object_quat", self.root_quat.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 4)).squeeze(1)),
-                refresh=lambda: self.target_object_quat.copy_(self.root_quat.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 4)).squeeze(1)),
-                visualize=lambda: self.visualize_poses(self.target_object_pos, self.target_object_quat)
+                as_tensor=lambda: self.target_object_quat,
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_quat", self.root_quat.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 4)).squeeze(1)),
+                    on_step=lambda: self.target_object_quat.copy_(self.root_quat.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 4)).squeeze(1)),
+                ),
+                visualize=lambda: self.visualize_poses(self.target_object_pos, self.target_object_quat),
             )
         )
 
-        self.register_observation(
-            "fingertip_to_target_object_pos",
-            Observation(
-                size=(3 * self.controller.fingertip_count,),
-                data=lambda: self.fingertip_to_target_object_pos.flatten(1, 2),
-                acquire=lambda: setattr(self, "fingertip_to_target_object_pos", self.target_object_pos.unsqueeze(1).repeat(1, self.controller.fingertip_count, 1) - self.fingertip_pos),
-                refresh=lambda: self.fingertip_to_target_object_pos.copy_(self.target_object_pos.unsqueeze(1).repeat(1, self.controller.fingertip_count, 1) - self.fingertip_pos),
-                visualize=lambda: self.visualize_distance(self.fingertip_pos, self.fingertip_to_target_object_pos),
-            )
-        )
-
+        # Register geometric object observations such as bounding boxes and synthetic point-clouds.
         self.register_observation(
             "object_bounding_box", 
-            Observation(
-                size=(self.cfg_env.objects.num_objects * 10,),  # pos, quat, extent
-                data=lambda: self.object_bounding_box.flatten(1, 2),
-                acquire=self._acquire_object_bounding_box,
-                refresh=self._refresh_object_bounding_box,
+            VectorObservation(
+                size=(10 * self.cfg_env.objects.num_objects,),
+                as_tensor=lambda: self.object_bounding_box.flatten(1, 2),
+                callback=Callback(
+                    on_init=self._acquire_object_bounding_box,
+                    on_step=self._refresh_object_bounding_box,
+                ),
                 visualize=lambda: self.visualize_bounding_boxes(self.object_bounding_box[..., 0:3], self.object_bounding_box[..., 3:7], self.object_bounding_box[..., 7:10]),
             )
         )
         self.register_observation(
             "target_object_bounding_box", 
-            Observation(
+            VectorObservation(
                 size=(10,),
-                data=lambda: self.target_object_bounding_box,
-                requires=["object_bounding_box"],
-                acquire=lambda: setattr(self, "target_object_bounding_box", torch.zeros((self.num_envs, 10)).to(self.device)),
-                refresh=lambda: self.target_object_bounding_box.copy_(self.object_bounding_box.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 10)).squeeze(1)),
-                visualize=lambda: self.visualize_bounding_boxes(self.target_object_bounding_box[..., 0:3], self.target_object_bounding_box[..., 3:7], self.target_object_bounding_box[..., 7:10]),
+                as_tensor=lambda: self.target_object_bounding_box,
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_bounding_box", torch.zeros((self.num_envs, 10)).to(self.device)),
+                    on_step=lambda: self.target_object_bounding_box.copy_(self.object_bounding_box.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 10)).squeeze(1)),
+                ),
+                visualize=lambda: self.visualize_bounding_boxes(self.target_object_bounding_box[:, 0:3], self.target_object_bounding_box[:, 3:7], self.target_object_bounding_box[:, 7:10]),
             )
         )
-
         self.register_observation(
-            "object_synthetic_pointcloud",
-            Observation(
-                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 3,),
-                key='pointcloud',
-                data=lambda: self.object_synthetic_pointcloud,
-                acquire=self._acquire_object_synthetic_pointcloud,
-                refresh=self._refresh_object_synthetic_pointcloud,
+            "object_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="object_synthetic",
+                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4,),
+                as_tensor=lambda: self.object_synthetic_pointcloud,
+                callback=Callback(
+                    on_init=self._acquire_object_synthetic_pointcloud,
+                    on_step=self._refresh_object_synthetic_pointcloud,
+                ),
                 visualize=lambda: self.visualize_points(self.object_synthetic_pointcloud, size=0.0025)
             )
         )
         self.register_observation(
-            "target_object_synthetic_pointcloud",
-            Observation(
-                size=(self.cfg_env.pointclouds.max_num_points, 3,),
-                key='pointcloud',
-                data=lambda: self.target_object_synthetic_pointcloud,
-                requires=["object_synthetic_pointcloud"],
-                acquire=lambda: setattr(self, "target_object_synthetic_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
-                refresh=lambda: self.target_object_synthetic_pointcloud.copy_(self.object_synthetic_pointcloud.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),
+            "object_synthetic_initial-pointcloud",
+            PointcloudObservation(
+                camera_name="object_synthetic_initial",
+                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4,),
+                as_tensor=lambda: self.object_synthetic_pointcloud_initial,
+                requires=["object_synthetic-pointcloud"],
+                callback=Callback(
+                    on_init=lambda: setattr(self, "object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),  # NOTE: Initial object observations are overwritten automatically once after the objects have been dropped.
+                ),
+                visualize=lambda: self.visualize_points(self.object_synthetic_pointcloud_initial, size=0.0025)
+            )
+        )
+        self.register_observation(
+            "target_object_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="target_object_synthetic",
+                size=(self.cfg_env.pointclouds.max_num_points, 4,),
+                as_tensor=lambda: self.target_object_synthetic_pointcloud,
+                requires=["object_synthetic-pointcloud"],
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_synthetic_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                    on_step=lambda: self.target_object_synthetic_pointcloud.copy_(self.object_synthetic_pointcloud.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),
+                ),
+                visualize=lambda: self.visualize_points(self.target_object_synthetic_pointcloud, size=0.0025)
+            )
+        )
+        self.register_observation(
+            "target_object_synthetic_initial-pointcloud",
+            PointcloudObservation(
+                camera_name="target_object_synthetic_initial",
+                size=(self.cfg_env.pointclouds.max_num_points, 4,),
+                as_tensor=lambda: self.target_object_synthetic_pointcloud_initial,
+                requires=["object_synthetic_initial-pointcloud"],
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                    on_reset=lambda: self.target_object_synthetic_pointcloud_initial.copy_(self.object_synthetic_pointcloud_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),  # NOTE: Initial observations of the target object must only be refreshed on resets and do not change during the episode.
+                ),
                 visualize=lambda: self.visualize_points(self.target_object_synthetic_pointcloud, size=0.0025)
             )
         )
 
-        # self.register_observation(
-        #     "object_synthetic_pointcloud_initial",
-        #     Observation(
-        #         size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 3,),
-        #         key='pointcloud',
-        #         data=lambda: self.object_synthetic_pointcloud_initial,
-        #         requires=["object_synthetic_pointcloud"],
-        #         acquire=setattr(self, "object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
-        #         refresh=self._refresh_object_synthetic_pointcloud_initial,
-        #         visualize=lambda: self.visualize_points(self.object_synthetic_pointcloud, size=0.0025)
-        #     )
-        # )
+        # Register goal observations.
+        self.register_observation(
+            "goal_pos",
+            VectorObservation(
+                size=(3,),
+                as_tensor=lambda: self.goal_pos,
+                is_mandatory=True,  # NOTE: Required to compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "goal_pos", torch.zeros(self.num_envs, 3, device=self.device)),
+                ),
+            )
+        )
+        if self.cfg_task.rl.goal in ["throw", "oriented_reposition"]: # goal_quat either for the hand orientation or the goal bin orientation.
+            self.register_observation(
+                "goal_quat",
+                VectorObservation(
+                    size=(3,),
+                    as_tensor=lambda: self.goal_quat,
+                    is_mandatory=True,  # NOTE: Required to compute rewards.
+                    callback=Callback(
+                        on_init=lambda: setattr(self, "goal_quat", torch.zeros(self.num_envs, 3, device=self.device)),
+                    ),
+                )
+            )
 
-        if self.cfg_task.rl.goal == "reposition":
-            self.register_observation(
-                "goal_pos",
-                Observation(
-                    size=(3,),
-                    data=lambda: self.goal_pos,
-                    is_mandatory=True,  # Required for reward computation.
-                    acquire=lambda: setattr(self, "goal_pos", torch.zeros(self.num_envs, 3, device=self.device)),
-                )
+        # Register task observation (observations that make desired bahaviors easier to learn).
+        self.register_observation(
+            "fingertip_to_target_object_pos", 
+            VectorObservation(
+                size=(3 * self.controller.fingertip_count,),
+                as_tensor=lambda: self.fingertip_to_target_object_pos.flatten(1, 2),
+                is_mandatory=True,  # NOTE: Required to compute rewards.
+                callback=Callback(
+                    on_init=lambda: setattr(self, "fingertip_to_target_object_pos", self.target_object_pos.unsqueeze(1).repeat(1, self.controller.fingertip_count, 1) - self.fingertip_pos),
+                    on_step=lambda: self.fingertip_to_target_object_pos.copy_(self.target_object_pos.unsqueeze(1).repeat(1, self.controller.fingertip_count, 1) - self.fingertip_pos),
+                ),
+                visualize=lambda: self.visualize_distance(self.fingertip_pos, self.fingertip_to_target_object_pos),
             )
-            self.register_observation(
-                "target_object_to_goal_pos",
-                Observation(
-                    size=(3,),
-                    data=lambda: self.target_object_to_goal_pos,
-                    acquire=lambda: setattr(self, "target_object_to_goal_pos", self.goal_pos - self.target_object_pos),
-                    refresh=lambda: self.target_object_to_goal_pos.copy_(self.goal_pos - self.target_object_pos),
-                    visualize=lambda: self.visualize_distance(self.target_object_pos, self.target_object_to_goal_pos),
-                )
+        )
+        self.register_observation(
+            "target_object_to_goal_pos",
+            VectorObservation(
+                size=(3,),
+                as_tensor=lambda: self.target_object_to_goal_pos,
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_to_goal_pos", self.goal_pos - self.target_object_pos),
+                    on_step=lambda: self.target_object_to_goal_pos.copy_(self.goal_pos - self.target_object_pos),
+                ),
+                visualize=lambda: self.visualize_distance(self.target_object_pos, self.target_object_to_goal_pos),
             )
+        )
+
 
     def _acquire_env_cfg(self) -> DictConfig:
         cfg_env = hydra.compose(config_name=self._env_cfg_path)['task']
@@ -256,6 +493,8 @@ class HandArmEnvMultiObject(HandArmBase):
             self.bin_info = hydra.compose(config_name=bin_info_path)
             self.bin_info = self.bin_info['']['']['']['']['']['']['assets']['hand_arm'][cfg_env.bin.asset]
 
+        if self.cfg_task.rl.goal == "throw":
+            self.goal_bin_half_extent = torch.Tensor([0.1, 0.1, 0.1])
         return cfg_env
 
     def _acquire_objects(self) -> None:
@@ -334,6 +573,16 @@ class HandArmEnvMultiObject(HandArmBase):
             goal_asset = self.gym.create_sphere(self.sim, 0.025, goal_options)
             goal_rigid_body_count = self.gym.get_asset_rigid_body_count(goal_asset)
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
+        elif self.cfg_task.rl.goal == "throw":
+            goal_options = gymapi.AssetOptions()
+            goal_options.fix_base_link = True
+            goal_options.use_mesh_materials = True
+            goal_bin_tmp_path = os.path.join(os.path.dirname(__file__), 'goal_bin.urdf')
+            generate_cuboid_bin_urdf(0.2, 0.2, goal_bin_tmp_path)
+            goal_asset = self.gym.load_asset(self.sim, str(os.path.dirname(__file__)), 'goal_bin.urdf', bin_options)
+            os.remove(goal_bin_tmp_path)
+            goal_rigid_body_count = self.gym.get_asset_rigid_body_count(goal_asset)
+            goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
         else:
             assert False
 
@@ -351,10 +600,17 @@ class HandArmEnvMultiObject(HandArmBase):
             objects_rigid_shape_count = sum([o.rigid_shape_count for o in [self.objects[i] for i in object_indices]])
 
             # Create goal actor.
-            if not self.headless:
+            if self.cfg_task.rl.goal == "reposition":
+                if not self.headless:
+                    goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3)
+                    for rigid_body_index in range(self.gym.get_actor_rigid_body_count(env_ptr, goal_handle)):
+                        self.gym.set_rigid_body_color(env_ptr, goal_handle, rigid_body_index, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0.0, 1.0, 0.0))
+                    self.goal_handles.append(goal_handle)
+                    self.goal_actor_indices.append(actor_count)
+                    actor_count += 1
+            
+            elif self.cfg_task.rl.goal == "throw":
                 goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3)
-                for rigid_body_index in range(self.gym.get_actor_rigid_body_count(env_ptr, goal_handle)):
-                    self.gym.set_rigid_body_color(env_ptr, goal_handle, rigid_body_index, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0.0, 1.0, 0.0))
                 self.goal_handles.append(goal_handle)
                 self.goal_actor_indices.append(actor_count)
                 actor_count += 1
@@ -380,7 +636,7 @@ class HandArmEnvMultiObject(HandArmBase):
 
             # Create cameras.
             for camera in self.camera_dict.values():
-                camera.create_sensor(self.gym, self.sim, env_ptr)
+                camera.connect_simulation(self.gym, self.sim, env_ptr, self.device)
 
             # Create bin actor.
             if self.cfg_env.bin.asset != 'no_bin':
@@ -390,7 +646,7 @@ class HandArmEnvMultiObject(HandArmBase):
             # Create object actors
             for i, object_index in enumerate(object_indices):
                 used_object = self.objects[object_index]
-                object_handle = self.gym.create_actor(env_ptr, used_object.asset, used_object.start_pose, used_object.name, env_index, 0, 3 + i)
+                object_handle = used_object.create_actor(env_ptr, env_index, 0, 3 + i)
                 self.object_handles[env_index].append(object_handle)
                 self.object_actor_indices[env_index].append(actor_count)
                 actor_count += 1
@@ -414,11 +670,6 @@ class HandArmEnvMultiObject(HandArmBase):
 
         self.goal_actor_indices = torch.tensor(self.goal_actor_indices, dtype=torch.int32, device=self.device)
         self.goal_actor_env_index = self.gym.find_actor_index(env_ptr, "goal", gymapi.DOMAIN_ENV)
-
-        # Create cameras.
-        #for camera in self.camera_dict.values():
-        #    for k, v in camera._camera_tensors.items():
-        #        camera._camera_tensors[k] = torch.stack(v)
 
         # self.controller_actor_id_env = self.gym.find_actor_index(
         #     env_ptr, 'robot', gymapi.DOMAIN_ENV)
@@ -460,11 +711,23 @@ class HandArmEnvMultiObject(HandArmBase):
         in_bin = torch.logical_and(in_bin, object_pos[..., 2] <= z_upper)
         return in_bin
     
+    def target_object_in_goal_bin(self) -> torch.BoolTensor:
+        # Project object pos into goal bin frame.
+        target_object_pos_in_goal_frame = quat_rotate(self.goal_quat, self.target_object_pos) - self.goal_pos
+
+        half_extent = self.goal_bin_half_extent.unsqueeze(0).repeat(self.num_envs, 1).to(self.device)
+
+        in_goal_bin = (target_object_pos_in_goal_frame >= - half_extent) & (target_object_pos_in_goal_frame <= half_extent)
+        return in_goal_bin.all(dim=-1)
+    
     def visualize_bin_extent(self) -> None:
         for env_id in range(self.num_envs):
             bin_pose = gymapi.Transform(p=gymapi.Vec3(*self.cfg_env.bin.pos))
             bbox = gymutil.WireframeBBoxGeometry(torch.tensor(self.bin_info['extent']), pose=bin_pose, color=(0, 1, 1))
             gymutil.draw_lines(bbox, self.gym, self.viewer, self.env_ptrs[env_id], pose=gymapi.Transform())
+
+    def visualize_goal_bin_extent(self) -> None:
+        self.visualize_bounding_boxes(self.goal_pos, self.goal_quat, 2 * self.goal_bin_half_extent.unsqueeze(0).repeat(self.num_envs, 1))
 
     def _acquire_object_bounding_box(self) -> None:
         self.object_bounding_box = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, 10)).to(self.device)  # [pos, quat, extents] with shape (num_envs, num_objects_per_bin, 10)
@@ -524,5 +787,26 @@ class HandArmEnvMultiObject(HandArmBase):
         self.object_synthetic_pointcloud_ordered[..., 0:3] *= self.object_synthetic_pointcloud_ordered[..., 3:].repeat(1, 1, 1, 3)  # Set points that are only padding to zero.
 
         self.object_synthetic_pointcloud[:] = self.object_synthetic_pointcloud_ordered[:, :, torch.randperm(self.cfg_env.pointclouds.max_num_points), :]  # Randomly permute points.
+
+    def _acquire_object_mass(self) -> None:
+        self.object_mass = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)
+        for env_index in range(self.num_envs):
+            for object_index in range(self.cfg_env.objects.num_objects):
+                self.object_mass[env_index, object_index] = self.objects[self.object_indices[env_index, object_index]].mass
+
+    def _acquire_object_com(self) -> None:
+        self.object_com = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, 3)).to(self.device)
+        for env_index in range(self.num_envs):
+            for object_index in range(self.cfg_env.objects.num_objects):
+                com = self.objects[self.object_indices[env_index, object_index]].com
+                self.object_com[env_index, object_index] = torch.Tensor([com.x, com.y, com.z])
+
+    def _acquire_object_inertia(self) -> None:
+        self.object_inertia = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, 3, 3)).to(self.device)
+        for env_index in range(self.num_envs):
+            for object_index in range(self.cfg_env.objects.num_objects):
+                inertia = self.objects[self.object_indices[env_index, object_index]].inertia
+                self.object_inertia[env_index, object_index] = torch.Tensor([[inertia.x.x, inertia.x.y, inertia.x.z], [inertia.y.x, inertia.y.y, inertia.y.z], [inertia.z.x, inertia.z.y, inertia.z.z]])
+
 
         

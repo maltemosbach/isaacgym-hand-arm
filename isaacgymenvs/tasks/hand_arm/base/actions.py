@@ -1,4 +1,4 @@
-from isaacgym import gymapi
+from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import *
 from omegaconf import DictConfig
 import os
@@ -31,8 +31,52 @@ class ActorMixin:
     def refresh_action_tensors(self) -> None:
         pass
 
+    def apply_controls(self, actions: torch.Tensor) -> None:
+        self.actions = actions.clone().to(self.device)
 
-class Controller:
+        # actions 0-6 arm arm DoFs. 6 is thumb opposition 7 is thumb flextion 8 is index finger 9 is middle finger 10 is ring finger
+
+        if self.cfg_base.control.type == "joint":
+
+            if self.cfg_base.control.mode == "absolute":
+
+                actuated_joint_targets = scale(
+                self.actions, self.controller.actuated_dof_lower_limits, self.controller.actuated_dof_upper_limits
+                )
+
+                self.current_dof_pos_targets[:, :] = scale(
+                    joint_actions, self.controller.dof_lower_limits, self.controller.dof_upper_limits
+                )
+
+                self.current_dof_pos_targets[:, :] = (
+                    self.cfg_base.control.moving_average * self.current_dof_pos_targets
+                    + (1.0 - self.cfg_base.control.moving_average) * self.previous_dof_pos_targets
+                )
+            
+            elif self.cfg_base.control.mode == "relative":
+                self.current_actuated_dof_pos_targets[:, 0:self.arm_dof_count] += self.dt * self.cfg_base.control.joint.arm_action_scale * self.actions[:, 0:self.arm_dof_count]
+                self.current_actuated_dof_pos_targets[:, self.arm_dof_count:] += self.dt * self.cfg_base.control.joint.hand_action_scale * self.actions[:, self.arm_dof_count:]
+
+                self.current_actuated_dof_pos_targets = tensor_clamp(
+                    self.current_actuated_dof_pos_targets, self.controller.actuated_dof_lower_limits, self.controller.actuated_dof_upper_limits
+                )
+                self.current_dof_pos_targets[:, :] = self.controller.actuated_to_all(self.current_actuated_dof_pos_targets)
+
+            else:
+                assert False
+
+            self.current_dof_pos_targets[:, :] = tensor_clamp(
+                self.current_dof_pos_targets, self.controller.dof_lower_limits, self.controller.dof_upper_limits
+            )
+
+            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.current_dof_pos_targets))
+            self.previous_actuated_dof_pos_targets[:, :] = self.current_actuated_dof_pos_targets[:, :]
+        
+        else:
+            assert False
+
+
+class Robot:
     def __init__(self, rootpath: str, asset_cfg: DictConfig) -> None:
         self.rootpath = rootpath
         self.filename = asset_cfg.robot
@@ -114,6 +158,12 @@ class Controller:
         asset_options.angular_damping = 0.01
         asset_options.linear_damping = 0.01
         return asset_options
+    
+
+    def actuated_dofs_to_all_dofs(self, actuated_angles: torch.Tensor) -> torch.Tensor:
+        batch_size, num_actuated_dofs = actuated_angles.shape
+        assert num_actuated_dofs == self.actuator_count
+        return torch.matmul(actuated_angles, self.mimic_multiplier.t()) + self.mimic_offset.expand(batch_size, -1)
     
     def map_actions_to_dof_pos_targets(actions: torch.Tensor) -> torch.Tensor:
         if self.cfg_base.control.type == "joint":

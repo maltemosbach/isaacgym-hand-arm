@@ -2,28 +2,30 @@ import hydra
 from omegaconf import DictConfig
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgymenvs.tasks.base.vec_task import VecTask
-from isaacgymenvs.tasks.hand_arm.base.actions import Controller, ActorMixin
-from isaacgymenvs.tasks.hand_arm.base.camera_sensor import CameraSensor
-from isaacgymenvs.tasks.hand_arm.base.observations import Observation, ObserverMixin
+from isaacgymenvs.tasks.hand_arm.base.actions import ActorMixin
+from isaacgymenvs.tasks.hand_arm.base.camera_sensor import CameraMixin
+from isaacgymenvs.tasks.hand_arm.base.logger import LoggerMixin
+from isaacgymenvs.tasks.hand_arm.base.observations import ObserverMixin
 from isaacgymenvs.tasks.hand_arm.base.simulation import SimulationMixin
 from isaacgymenvs.tasks.hand_arm.utils import URDFRobot
 from isaacgym.torch_utils import *
 import matplotlib
 from typing import *
+import cv2
 
 
 
 
-class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
+class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMixin, CameraMixin):
     _asset_root: str = '../assets/hand_arm/'
     _base_cfg_path: str = 'task/HandArmBase.yaml'
 
     arm_dof_count = 6
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
-        self.log_data = {}
         self.cfg = cfg
         self.cfg_base = self._acquire_base_cfg()
+        self.camera_dict = self._acquire_camera_dict()
         self.controller = URDFRobot(self._asset_root, self.cfg_base.asset.robot)
 
         self.register_observations()
@@ -47,14 +49,6 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
             self._set_viewer_params()
 
     def _acquire_base_cfg(self) -> DictConfig:
-        self.camera_dict = {}
-        if "cameras" in self.cfg_env.keys():
-            for camera_name, camera_cfg in self.cfg_env.cameras.items():
-                if camera_name in self.cfg['env']['observations']:
-                    self.camera_dict[camera_name] = CameraSensor(**camera_cfg)
-        
-        print("self.camera_dict:", self.camera_dict)
-
         return hydra.compose(config_name=self._base_cfg_path)['task']
 
     def acquire_base_tensors(self):
@@ -64,28 +58,12 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
 
     def refresh_base_tensors(self):
         self.refresh_simulation_tensors()
+        self.refresh_images()
         self.refresh_action_tensors()
         self.refresh_observation_tensors()
 
-    def log(self, data: Dict[str, Any]) -> None:
-        self.log_data = {**self.log_data, **data}
-
     def _acquire_ros_interface(self):
         raise NotImplementedError
-
-    def compute_sensor_outputs(self) -> Dict[str, Dict[str, torch.Tensor]]:
-        self.gym.render_all_camera_sensors(self.sim)
-
-        self.gym.start_access_image_tensors(self.sim)
-        image_dict = {}
-        for camera_name, camera_sensor in self.camera_dict.items():
-            image_dict[camera_name] = camera_sensor.get_outputs()
-        self.gym.end_access_image_tensors(self.sim)
-
-        print("image_dict:", image_dict)
-
-        input()
-        return image_dict
     
     def create_sim(self):
         """Set sim and PhysX params. Create sim object, ground plane, and envs."""
@@ -123,57 +101,7 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
         #reset_goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
         #self.reset_target_pose(reset_goal_env_ids)
 
-        self.actions = actions.clone().to(self.device)
-
-        # actions 0-6 arm arm DoFs. 6 is thumb opposition 7 is thumb flextion 8 is index finger 9 is middle finger 10 is ring finger
-
-        #print("actions.shape:", actions.shape)
-        #print("actions.device:", actions.device)
-        #print("self.current_dof_pos_targets:", self.current_dof_pos_targets.device)
-
-
-        if self.cfg_base.control.type == "joint":
-            #joint_actions = self.controller.actuated_to_all(self.actions)
-            #print("joint_actions:", joint_actions)
-
-
-            if self.cfg_base.control.mode == "absolute":
-
-                actuated_joint_targets = scale(
-                self.actions, self.controller.actuated_dof_lower_limits, self.controller.actuated_dof_upper_limits
-                )
-
-                print("actuated_joint_targets:", actuated_joint_targets)
-                
-                self.current_dof_pos_targets[:, :] = scale(
-                    joint_actions, self.controller.dof_lower_limits, self.controller.dof_upper_limits
-                )
-
-                self.current_dof_pos_targets[:, :] = (
-                    self.cfg_base.control.moving_average * self.current_dof_pos_targets
-                    + (1.0 - self.cfg_base.control.moving_average) * self.previous_dof_pos_targets
-                )
-            
-            elif self.cfg_base.control.mode == "relative":
-                self.current_actuated_dof_pos_targets[:, 0:self.arm_dof_count] += self.dt * self.cfg_base.control.joint.arm_action_scale * self.actions[:, 0:self.arm_dof_count]
-                self.current_actuated_dof_pos_targets[:, self.arm_dof_count:] += self.dt * self.cfg_base.control.joint.hand_action_scale * self.actions[:, self.arm_dof_count:]
-
-                self.current_actuated_dof_pos_targets = tensor_clamp(
-                    self.current_actuated_dof_pos_targets, self.controller.actuated_dof_lower_limits, self.controller.actuated_dof_upper_limits
-                )
-                self.current_dof_pos_targets[:, :] = self.controller.actuated_to_all(self.current_actuated_dof_pos_targets)
-
-            else:
-                assert False
-
-            self.current_dof_pos_targets[:, :] = tensor_clamp(
-                self.current_dof_pos_targets, self.controller.dof_lower_limits, self.controller.dof_upper_limits
-            )
-            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.current_dof_pos_targets))
-            self.previous_actuated_dof_pos_targets[:, :] = self.current_actuated_dof_pos_targets[:, :]
-        
-        else:
-            assert False
+        self.apply_controls(actions)
 
 
         if len(reset_env_ids) > 0:
@@ -183,7 +111,6 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
     def compute_reward(self):
         self._update_reset_buf()
         self._update_rew_buf()
-        
 
     def post_physics_step(self):
         self.progress_buf[:] += 1
@@ -192,10 +119,18 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
 
         self.compute_reward()
         self.compute_observations()
-        if self.camera_dict:
-            self.obs_dict["image"] = self.compute_sensor_outputs()
+        #if self.camera_dict:
+        #    self.obs_dict["image"] = self.compute_sensor_outputs()
 
-        if len(self.cfg_base.debug.visualize) > 0 and not self.headless:
+        # print("self.obs_dict:", self.obs_dict)
+
+
+        # import matplotlib.pyplot as plt
+
+        # plt.imshow(self.obs_dict["image"]["rgb_frontview"]["color"][0].cpu().numpy())
+        # plt.show()
+
+        if len(self.cfg_base.debug.visualize) > 0: # and not self.headless:
             self.gym.clear_lines(self.viewer)
             self.draw_visualizations(self.cfg_base.debug.visualize)
 
@@ -231,7 +166,7 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
         for visualization in visualizations:
             # If an observation is visualized.
             if visualization in self.cfg_task.env.observations:
-                self.observations[visualization].visualize()
+                self._observations[visualization].visualize()
 
             # Call any other visualization functions (e.g. workspace extent, etc.).
             else:
@@ -299,4 +234,15 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin):
                     self.env_ptrs[env_index], self.controller_handles[env_index], rb_index, gymapi.MESH_VISUAL, gymapi.Vec3(*rgb[env_index, rb_index]),
                 )
 
+    def visualize_image(self, image_tensor: torch.Tensor, window_name: str = "image", env_indices: Sequence[int] = (0,)) -> None:
+        for env_index in env_indices:
+            image_cv2 = cv2.cvtColor(image_tensor[env_index].cpu().numpy(), cv2.COLOR_RGB2BGR)
+            cv2.imshow(window_name + f" (Env {env_index})", image_cv2)
+            cv2.waitKey(1)
+
+    def visualize_depth(self, depth_tensor: torch.Tensor, window_name: str = "depth", env_indices: Sequence[int] = (0,), max_depth: float = 2.0) -> None:
+        for env_index in env_indices:
+            depth_np = ((-depth_tensor[env_index].cpu().numpy() / max_depth).clip(0.0, 1.0) * 255).astype(np.uint8)
+            cv2.imshow(window_name + f" (Env {env_index})", depth_np)
+            cv2.waitKey(1)
 

@@ -28,20 +28,6 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
     def _acquire_task_cfg(self) -> DictConfig:
         return hydra.compose(config_name=self._task_cfg_path)['task']
-    
-    def register_observations(self) -> None:
-        super().register_observations()
-        self.register_observation(
-            'fingertip_closest_distance',
-            Observation(
-                size=(1,),
-                data=lambda: self.fingertip_closest_distance,
-                is_mandatory=True,  # Required to save initial object pose.
-                acquire=lambda: setattr(self, "object_pos", self.root_pos[:, self.object_actor_env_indices, 0:3]),
-                refresh=lambda: self.object_pos.copy_(self.root_pos[:, self.object_actor_env_indices, 0:3]),
-                visualize=lambda: self.visualize_poses(self.object_pos, self.object_quat),
-            )
-        )
 
     def reset_idx(self, env_ids):
         if self.objects_dropped:
@@ -150,6 +136,10 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         noise = 2 * (torch.rand((len(env_ids), 3), dtype=torch.float32, device=self.device) - 0.5)  # [-1, 1]
         noise = noise @ torch.diag(torch.tensor(getattr(self.cfg_env.objects, key).noise, device=self.device))
         pos += noise
+
+        if key == "goal" and self.cfg_task.rl.goal == "throw":
+            pos[:, 1] += 0.5
+
         return pos
 
     def _get_random_quat(self, env_ids) -> torch.Tensor:
@@ -178,30 +168,25 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                 print(f"Target object in env {env_id} is '{self.objects[self.object_indices[env_id][self.target_object_index[env_id]]].name}'.")
 
     def _reset_goal(self, env_ids) -> None:
+        reset_indices = self.object_actor_indices[env_ids].flatten()
+
         self.goal_pos[env_ids] = self._get_random_object_pos(env_ids, 'goal')
         self.root_pos[env_ids, self.goal_actor_env_index] = self.goal_pos[env_ids]
 
-        if self.cfg_task.rl.goal == "oriented_reposition":
-            self.goal_manipulator_quat[env_ids] = self._get_random_quat(env_ids)
+        if "reposition" in self.cfg_task.rl.goal:
+            if not self.headless:
+                reset_indices = torch.cat([reset_indices, self.goal_actor_indices[env_ids]])
+            if self.cfg_task.rl.goal == "oriented_reposition":
+                self.goal_quat[env_ids] = self._get_random_quat(env_ids)
 
-        reset_indices = self.object_actor_indices[env_ids].flatten()
-            
-        if not self.headless:
+        elif self.cfg_task.rl.goal == "throw":
+            self.goal_quat[env_ids] = torch.Tensor(([0., 0., 0., 1.],)).to(device=self.device).repeat(len(env_ids), 1)
             reset_indices = torch.cat([reset_indices, self.goal_actor_indices[env_ids]])
         
         # Set actor root state is required to reset the objects and the goals but can only be called once. Hence no resets are applied in the reset_objects() function.
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self.root_state), gymtorch.unwrap_tensor(reset_indices), len(reset_indices)
         )
-
-    def _get_random_goal_pos(self, env_ids) -> torch.Tensor:
-        object_pos_goal = torch.tensor(self.object_pos_goal, device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
-        object_pos_goal_noise = 2 * (torch.rand((len(env_ids), 3), dtype=torch.float32, device=self.device) - 0.5)  # [-1, 1]
-        object_pos_goal_noise = object_pos_goal_noise @ torch.diag(torch.tensor(
-            self.cfg_task.randomize.object_pos_goal_noise, device=self.device))
-        object_pos_goal += object_pos_goal_noise
-        return object_pos_goal
-
 
     def _update_reset_buf(self):
         self.reset_buf[:] = torch.where(
@@ -211,33 +196,30 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
     def _update_rew_buf(self):
         self.rew_buf[:] = 0.
 
-        object_goal_distance = self._compute_object_goal_distance()
-        goal_reached = object_goal_distance < self.cfg_task.rl.goal_threshold
+        object_goal_distance, goal_reached = self._compute_object_goal_distance()
         self._update_success_rate(goal_reached)
 
-        height_increase, object_lifted  = self._compute_object_lifting()
+        delta_target_object_pos, object_lifted  = self._compute_object_lifting()
 
         reward_terms = {}
         for reward_term, scale in self.cfg_task.rl.reward.items():
             if reward_term == 'lifting':
-                delta_h = torch.clip(self.cfg_task.rl.lifting_threshold - height_increase, min=0.) / self.cfg_task.rl.lifting_threshold  # Goes from 1: not lifted at all, to 0: lifted to threshold or above.
+                delta_h = torch.clip(self.cfg_task.rl.lifting_threshold - delta_target_object_pos[:, 2], min=0., max=self.cfg_task.rl.lifting_threshold) / self.cfg_task.rl.lifting_threshold  # Goes from 1: not lifted at all, to 0: lifted to threshold or above.
 
                 #print("delta_h", delta_h)
                 lifting_reward_temp = 3.0
-                objects_in_bin = self.objects_in_bin(self.target_object_pos)
-                reward = scale * objects_in_bin * (torch.exp(-lifting_reward_temp * delta_h) - torch.exp(-lifting_reward_temp * torch.ones_like(delta_h)))
+                reward = scale * (torch.exp(-lifting_reward_temp * delta_h) - torch.exp(-lifting_reward_temp * torch.ones_like(delta_h)))
             
             elif reward_term == 'reaching':
                 target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
-                fingertip_distance = torch.min(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1).values
-
-                print("fingertip_distance", fingertip_distance)
+                #fingertip_distance = torch.min(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1).values
+                fingertip_distance = torch.sum(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1)
 
                 reaching_reward_temp = 3.0
                 reward = scale * torch.exp(-reaching_reward_temp * fingertip_distance)
 
             elif reward_term == 'goal':
-                goal_reward_temp = 10.0
+                goal_reward_temp = 5.0
                 reward = scale * object_lifted * torch.exp(-goal_reward_temp * object_goal_distance)
 
             elif reward_term == 'object_velocity_penalty':
@@ -262,25 +244,8 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                     torch.zeros_like(dof_vel)
                 )
                 reward = torch.clip(reward, -10, 0)
-                
-            elif reward_term == 'fingertip_progression':
-                target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
-                fingertip_dist = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=-1).sum(dim=-1)
-                fingertip_delta_closest = self.fingertip_closest_distance - fingertip_dist  # This is positive if the the keypoints got closer to the object and negative if they got further away than the closest distance so far.
-                self.fingertip_closest_distance[:] = torch.minimum(self.fingertip_closest_distance, fingertip_dist)  # Update closest distance the keypoints have gotten.
 
-                fingertip_delta_furthest = self.fingertip_furthest_distance - fingertip_dist
-                self.fingertip_furthest_distance[:] = torch.maximum(self.fingertip_furthest_distance, fingertip_dist)  # Update furthest distance the keypoints have gotten.
-                
-                reward = scale * ~self.object_lifted_before * torch.clip(fingertip_delta_closest, 0, 10)  # Reward getting closer than the closest we have gotten.
-                #reward += 0.1 * scale * ~self.object_lifted_before * torch.clip(fingertip_delta_furthest, -10, 0)  # Penalize getting further away than the furthest we have gotten.
-
-            elif reward_term == 'goal_progression':
-                object_goal_distance_delta = self.object_goal_closest_distance - object_goal_distance
-                self.object_goal_closest_distance[:] = torch.minimum(self.object_goal_closest_distance, object_goal_distance)
-                reward = scale * self.object_lifted_before * torch.clip(object_goal_distance_delta, 0, 100)  # Reward getting closer than the closest we have gotten.
-
-            elif reward_term == 'success_bonus':
+            elif reward_term == 'success':
                 reward = scale * goal_reached
 
             else:
@@ -289,13 +254,12 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             self.rew_buf[:] += reward
             reward_terms['reward_terms/' + reward_term] = reward.mean().item()
 
-        print(reward_terms)
         self.log(reward_terms)
 
     
 
     def _update_success_rate(self, goal_reached: torch.Tensor) -> None:
-        self.goal_reached_before[:] = torch.logical_or(goal_reached, self.goal_reached_before)                      
+        self.goal_reached_before[:] = torch.logical_or(goal_reached, self.goal_reached_before)                 
 
         # Log exponentially weighted moving average (EWMA) of the success rate
         if not hasattr(self, "success_rate_ewma"):
@@ -308,7 +272,8 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         if num_resets > 0:
             num_successes = torch.sum(self.goal_reached_before)
             curr_success_rate = num_successes / num_resets
-            alpha = 0.02 * (num_resets / self.num_envs)
+            
+            alpha = 0.2 * (num_resets / self.num_envs)
             self.success_rate_ewma = alpha * curr_success_rate + (1 - alpha) * self.success_rate_ewma
             self.log({"success_rate_ewma/overall": self.success_rate_ewma})
 
@@ -326,37 +291,43 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             if num_resets > 0:
                 num_successes = torch.sum(self.goal_reached_before[target_object_index_in_all_objects == i])
                 current_success_rate = num_successes / num_resets
-                alpha = 0.02 * (num_resets / self.num_envs)
+                alpha = 0.2 * (num_resets / self.num_envs) * len(self.objects)
                 setattr(self, obj.name + "_success_rate_ewma", alpha * current_success_rate + (1 - alpha) * getattr(self, obj.name + "_success_rate_ewma"))
                 self.log({"success_rate_ewma/" + obj.name: getattr(self, obj.name + "_success_rate_ewma")})
 
     def _compute_object_goal_distance(self) -> torch.Tensor:
         if self.cfg_task.rl.goal == "lift":
             object_goal_distance = torch.clamp(self.target_object_pos[:, 2] - self.goal_height, min=0.0)
+            goal_reached = self.target_object_pos[:, 2] > self.goal_height
+
         elif "reposition" in self.cfg_task.rl.goal:
             object_goal_distance = torch.norm(self.target_object_pos - self.goal_pos, dim=-1)
             if self.cfg_task.rl.goal == "oriented_reposition":
                 eef_body_quat_diff = quat_mul(self.eef_body_goal_quat, quat_conjugate(self.eef_body_quat))
                 eef_body_rot_dist = 2.0 * torch.asin(torch.clamp(torch.norm(eef_body_quat_diff[:, 0:3], p=2, dim=-1), max=1.0))
                 object_goal_distance += 0.1 * eef_body_rot_dist
+
+            goal_reached = object_goal_distance < self.cfg_task.rl.goal_threshold
+
+        elif self.cfg_task.rl.goal == "throw":
+            object_goal_distance = torch.norm(self.target_object_pos - self.goal_pos, dim=-1)
+            goal_reached = self.target_object_in_goal_bin()
+
         else:
             assert False, f"Unknown goal configuration {self.cfg_task.rl.goal} given."
             
-        return object_goal_distance
+        return object_goal_distance, goal_reached
     
-    def _compute_object_lifting(self) -> Tuple[torch.BoolTensor, torch.Tensor]:
+    def _compute_object_lifting(self) -> Tuple[torch.Tensor, torch.BoolTensor]:
         # Compute achieved height increase of the object.
-        current_height = self.target_object_pos[:, 2]
-        initial_height = self.object_pos_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)[:, 2]
-        height_increase = torch.clamp(current_height - initial_height, min=0.0)
-
-        object_lifted = height_increase > self.cfg_task.rl.lifting_threshold
+        delta_target_object_pos = self.target_object_pos - self.object_pos_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)
+        object_lifted = delta_target_object_pos[:, 2] > self.cfg_task.rl.lifting_threshold
 
         #just_lifted = torch.logical_and(height_increase > self.cfg_task.rl.lifting_threshold, ~self.object_lifted_before)
 
         #self.object_lifted_before[:] = torch.logical_or(lifted, self.object_lifted_before)
         #self.object_lifted_before = lifted
-        return height_increase, object_lifted
+        return delta_target_object_pos, object_lifted
     
     def _reset_buffers(self, env_ids) -> None:
         super()._reset_buffers(env_ids)
@@ -367,6 +338,7 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             self.fingertip_closest_distance = torch.zeros((self.num_envs,), device=self.device)
 
         self.object_lifted_before[env_ids] = False
+        self.goal_reached_before[env_ids] = False
         target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
         fingertip_dist = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=-1).sum(dim=-1)
         self.fingertip_closest_distance[env_ids] = fingertip_dist.clone().detach()[env_ids]

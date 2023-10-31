@@ -1,24 +1,38 @@
+from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from isaacgym import gymapi, gymtorch
+import numpy as np
 import hydra
 import os
 import torch
 from typing import Dict, List, Optional, Tuple
 import warnings
+from typing import Any
+from isaacgymenvs.tasks.hand_arm.base.observations import Observation
 
 
 @dataclass
-class SensorOutput:
-    name: str
-    required_image_types: List[gymapi.ImageType]
-    ros_topic: str
+class IsaacGymSensorOutput:
+    required_images: List[gymapi.ImageType] = field(default_factory=list)
+
+@dataclass
+class ROSSensorOutput:
+    message_topic: str = None
+    message_type: Any = None
 
 
-class ValidSensorOutputs(Enum):
-    COLOR = SensorOutput(name='color', required_image_types=[gymapi.ImageType.IMAGE_COLOR], ros_topic='/camera/color/image_raw')
-    POINTS = SensorOutput(name='points', required_image_types=[gymapi.ImageType.IMAGE_COLOR, gymapi.ImageType.IMAGE_DEPTH], ros_topic='/camera/points')
+@dataclass
+class SensorOutput(IsaacGymSensorOutput, ROSSensorOutput):
+    pass
+
+
+
+class SensorOutputs(Enum):
+    IMAGE = SensorOutput(required_images=[gymapi.ImageType.IMAGE_COLOR], message_topic='/camera/color/image_raw')
+    DEPTH = SensorOutput(required_images=[gymapi.ImageType.IMAGE_DEPTH], message_topic='/camera/depth/image_raw')
+    POINTCLOUD = SensorOutput(required_images=[gymapi.ImageType.IMAGE_COLOR, gymapi.ImageType.IMAGE_DEPTH], message_topic='/camera/points')
 
 
 @torch.jit.script
@@ -49,21 +63,21 @@ class CameraSensorProperties:
 
     def __init__(
             self,
-            pos: Tuple[float, float, float],
-            quat: Tuple[float, float, float, float],
+            sensor_outputs: List[str],
+            pos: Tuple[float, float, float] = (0, 0, 0),
+            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
             model: Optional[str] = None,
             fovx: Optional[int] = None,
-            resolution: Optional[Tuple[int, int]] = None,
-            sensor_outputs: Optional[List[str]] = None,
-            source: Optional[str] = 'isaacgym',  # Should be either 'isaacgym' or 'ros'.
+            resolution: Optional[Tuple[int, int]] = None
     ) -> None:
         self.pos = pos
         self.quat = quat
+        self.sensor_outputs = sensor_outputs
 
         if model is not None:
             self._acquire_properties_from_model(model)
         else:
-            self._acquire_properties_from_args(fovx, resolution, sensor_outputs, source)
+            self._acquire_properties_from_args(fovx, resolution)
     
     def _acquire_properties_from_model(self, model: str) -> None:
         self._model = model
@@ -72,11 +86,9 @@ class CameraSensorProperties:
         camera_info = camera_info['']['']['']['']['']['']['assets']['hand_arm']['cameras'][self.model]
         self._acquire_properties_from_args(camera_info.fovx, camera_info.resolution, camera_info.sensor_outputs, camera_info.source)
 
-    def _acquire_properties_from_args(self, fovx: int, resolution: Tuple[int, int], sensor_outputs: List[str], source: str) -> None:
+    def _acquire_properties_from_args(self, fovx: int, resolution: Tuple[int, int]) -> None:
         self.fovx = fovx
         self.resolution = resolution
-        self.sensor_outputs = sensor_outputs
-        self.source = source
 
     @property
     def pos(self) -> gymapi.Vec3:
@@ -133,21 +145,11 @@ class CameraSensorProperties:
     def sensor_outputs(self, value: List[str]) -> None:
         self._sensor_outputs = []
         for sensor_output in value:
-            if sensor_output.upper() in ValidSensorOutputs.__members__:
-                self._sensor_outputs.append(ValidSensorOutputs[sensor_output.upper()].value)
+            if sensor_output.upper() in SensorOutputs.__members__:
+                self._sensor_outputs.append(SensorOutputs[sensor_output.upper()].value)
             else:
                 warnings.warn(f"Invalid sensor output detected: '{sensor_output.upper()}'.")
         assert len(self._sensor_outputs) > 0, "No valid sensor outputs provided."
-
-    @property
-    def source(self) -> str:
-        return self._source
-    
-    @source.setter
-    def source(self, value: str) -> None:
-        if value not in ['isaacgym', 'ros']:
-            raise ValueError(f"Source should be either 'isaacgym' or 'ros', but found '{value}'.")
-        self._source = value
 
     @property
     def width(self) -> int:
@@ -171,86 +173,185 @@ class CameraSensorProperties:
         return gymapi.Transform(p=self.pos, r=self.quat)
     
     @property
-    def required_image_types(self) -> List[gymapi.ImageType]:
-        required_image_types = []
+    def required_images(self) -> List[gymapi.ImageType]:
+        required_images = []
         for sensor_output in self.sensor_outputs:
-            required_image_types.extend(sensor_output.required_image_types)
-        return required_image_types
+            required_images.extend(sensor_output.required_images)
+        return required_images
 
 
-class CameraSensor(CameraSensorProperties):
-    """Camera Sensor that wraps the same functionality as the IsaacGym camera sensors more convieniently."""
+class CameraSensor(CameraSensorProperties, ABC):
     def __init__(
             self,
-            pos: Tuple[float, float, float],
-            quat: Tuple[float, float, float, float],
+            sensor_outputs: List[str],
+            pos: Tuple[float, float, float] = (0, 0, 0),
+            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
             model: Optional[str] = None,
             fovx: Optional[int] = None,
-            resolution: Optional[Tuple[int, int]] = None,
-            sensor_outputs: Optional[List[str]] = None,
+            resolution: Optional[Tuple[int, int]] = None
     ) -> None:
+        super().__init__(sensor_outputs, pos, quat, model, fovx, resolution)
+        self.env_ptrs = []
+        
+    def connect_simulation(self, gym, sim, env_ptr, device: torch.device) -> None:
+        if not hasattr(self, 'gym'):
+            self.gym = gym
+            self.sim = sim
+            self.device = device
+        self.env_ptrs.append(env_ptr)
 
-        super().__init__(pos, quat, model, fovx, resolution, sensor_outputs)
+    @abstractmethod
+    def get_image(self) -> torch.Tensor:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_depth(self) -> torch.Tensor:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_pointcloud(self) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class IsaacGymCameraSensor(CameraSensor):
+    def __init__(
+            self,
+            sensor_outputs: List[str],
+            pos: Tuple[float, float, float] = (0, 0, 0),
+            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
+            model: Optional[str] = None,
+            fovx: Optional[int] = None,
+            resolution: Optional[Tuple[int, int]] = None
+    ) -> None:
+        super().__init__(sensor_outputs, pos, quat, model, fovx, resolution)
 
         self._camera_handles = []
         self._camera_tensors = defaultdict(list)
+        self._retrieved_tensors = {}
 
-        if ValidSensorOutputs.POINTS in self.sensor_outputs:
-            self.projection_matrix = self._acquire_projection_matrix()
-            self.view_matrix = self._acquire_view_matrix()
-            #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            #print("Using device:", self.device)
-
-    def create_sensor(self, gym, sim, env_ptr) -> None:
+    def connect_simulation(self, gym, sim, env_ptr, device: torch.device) -> None:
+        super().connect_simulation(gym, sim, env_ptr, device)
         # Create new camera handle and set its transform.
         camera_handle = gym.create_camera_sensor(env_ptr, self.camera_props)
         gym.set_camera_transform(camera_handle, env_ptr, self.transform)
         self._camera_handles.append(camera_handle)
 
         # Retrieve camera's GPU tensors.
-        for image_type in self.required_image_types:
+        for image_type in self.required_images:
             camera_tensor = gym.get_camera_image_gpu_tensor(sim, env_ptr, camera_handle, image_type)
             torch_camera_tensor = gymtorch.wrap_tensor(camera_tensor)
             self._camera_tensors[image_type].append(torch_camera_tensor)
 
-    def _get_sensor_output(self, sensor_output: SensorOutput) -> torch.Tensor:
-        if sensor_output in [ValidSensorOutputs.COLOR.value, ]:
-            return self._camera_tensors[sensor_output.required_image_types[0]]
-        
-        elif sensor_output == ValidSensorOutputs.POINTS.value:
-            depth_image = self._camera_tensors[gymapi.ImageType.IMAGE_DEPTH]
-            print("depth_image.shape:", depth_image.shape)
-
-            depth_image = torch.clamp(depth_image, min=-10.)  # Clamp to avoid NaNs.
-
-            xyz = depth_image_to_xyz(depth_image, self.projection_matrix, self.view_matrix, self.device)
-            return xyz
-
-        else:
-            assert False
-
-    def _acquire_projection_matrix(self) -> torch.Tensor:
-        proj_mat = torch.from_numpy(self.gym.get_camera_proj_matrix(self.sim, self.env_ptrs[0], self._camera_handles[0])).to(self.device)
-        fu = 2 / proj_mat[0, 0]
-        fv = 2 / proj_mat[1, 1]
-        return torch.Tensor([[fu, 0., 0.],
-                             [0., fv, 0.],
-                             [0., 0., 1.]]).to(self.device)
+    def retrieve_images(self) -> None:
+        for image_type in self.required_images:
+            self._retrieved_tensors[image_type] = torch.stack(self._camera_tensors[image_type])
     
-    def _acquire_view_matrix(self) -> torch.Tensor:
+    def get_image(self) -> torch.Tensor:
+        return self._retrieved_tensors[gymapi.ImageType.IMAGE_COLOR][..., 0:3]
+
+    def get_depth(self) -> torch.Tensor:
+        return self._retrieved_tensors[gymapi.ImageType.IMAGE_DEPTH]
+
+    def get_pointcloud(self, max_depth: float = 10) -> torch.Tensor:
+        is_valid = (self._retrieved_tensors[gymapi.ImageType.IMAGE_DEPTH] > -max_depth).to(self.device).view(len(self.env_ptrs), -1, 1)
+        depth_image = torch.clamp(self._retrieved_tensors[gymapi.ImageType.IMAGE_DEPTH], min=-max_depth)  # Clamp to avoid NaNs.
+        xyz = depth_image_to_xyz(depth_image, self.projection_matrix, self.view_matrix, self.device)
+        xyz = self.global_to_environment_xyz(xyz)
+        return torch.cat([xyz, is_valid], dim=-1)
+    
+    def global_to_environment_xyz(self, xyz, env_spacing: float = 1.):
+        """View matrices are returned in global instead of environment
+        coordinates in IsaacGym. This function projects the point-clouds into
+        their environment-specific frame, which is usually desired."""
+        # TODO: Make this more efficient by avoiding the for-loop.
+        num_per_row = max(int(np.sqrt(len(self.env_ptrs))), 2)
+        for env_id in range(len(self.env_ptrs)):
+            row = int(np.floor(env_id / num_per_row))
+            column = env_id % num_per_row
+            xyz[env_id, :, 0] -= column * 2 * env_spacing
+            xyz[env_id, :, 1] -= row * 2 * env_spacing
+        return xyz
+
+    @property
+    def projection_matrix(self) -> torch.Tensor:
+        if not hasattr(self, '_projection_matrix'):
+            proj_mat = torch.from_numpy(self.gym.get_camera_proj_matrix(self.sim, self.env_ptrs[0], self._camera_handles[0])).to(self.device)
+            fu = 2 / proj_mat[0, 0]
+            fv = 2 / proj_mat[1, 1]
+            self._projection_matrix = torch.Tensor([[fu, 0., 0.], [0., fv, 0.], [0., 0., 1.]]).to(self.device)
+        return self._projection_matrix
+    
+    @property
+    def view_matrix(self) -> torch.Tensor:
         """Returns the batch of view matrices of shape: [len(env_ptrs), 4, 4].
         The camera view matrix is returned in global instead of env coordinates
         in IsaacGym."""
-        view_mat = []
-        for env_ptr, env_idx in zip(self.env_ptrs, self.env_ids):
-            view_mat.append(torch.from_numpy(self.gym.get_camera_view_matrix(self.sim, env_ptr, self._camera_handles[env_idx])).to(self.device))
-        return torch.stack(view_mat)
+        if not hasattr(self, '_view_matrix'):
+            view_mat = []
+            for env_ptr, env_index in zip(self.env_ptrs, list(range(len(self.env_ptrs)))):
+                view_mat.append(torch.from_numpy(self.gym.get_camera_view_matrix(self.sim, env_ptr, self._camera_handles[env_index])).to(self.device))
+            self._view_matrix = torch.stack(view_mat)
+        return self._view_matrix
+    
 
-    def get_outputs(self) -> Dict[SensorOutput, torch.Tensor]:
-        image_dict = {}
+class ROSCameraSensor(CameraSensor):
+    def __init__(
+            self,
+            sensor_outputs: List[str],
+            pos: Tuple[float, float, float] = (0, 0, 0),
+            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
+            model: Optional[str] = None,
+            fovx: Optional[int] = None,
+            resolution: Optional[Tuple[int, int]] = None
+    ) -> None:
+        super().__init__(sensor_outputs, pos, quat, model, fovx, resolution)
 
-        for sensor_output in self.sensor_outputs:
-            image_dict[sensor_output.name] = self._get_sensor_output(sensor_output)
+    def get_image(self) -> torch.Tensor:
+        pass
 
-        return image_dict
+    def get_depth(self) -> torch.Tensor:
+        pass
 
+    def get_pointcloud(self, max_depth: float = 10) -> torch.Tensor:
+        pass
+
+
+class CameraMixin:
+    def _acquire_camera_dict(self) -> Dict[str, CameraSensor]:
+        camera_dict = {}
+        if "cameras" in self.cfg_env.keys():
+            for camera_name, camera_cfg in self.cfg_env.cameras.items():
+                sensor_outputs = []
+                for observation_name in self.cfg_task.env.observations:
+                   if observation_name.startswith(camera_name):
+                        sensor_outputs.append(observation_name.split("-")[-1])
+
+                if sensor_outputs:
+                    camera_dict[camera_name] = self.create_camera_sensor(**camera_cfg, sensor_outputs=sensor_outputs)
+        return camera_dict
+
+    def create_camera_sensor(
+            self,
+            sensor_outputs: List[str],
+            pos: Tuple[float, float, float] = (0, 0, 0),
+            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
+            model: Optional[str] = None,
+            fovx: Optional[int] = None,
+            resolution: Optional[Tuple[int, int]] = None
+    ) -> None:
+        if self.cfg_base.ros.activate:
+            return ROSCameraSensor(sensor_outputs, pos, quat, model, fovx, resolution)
+        else:
+            return IsaacGymCameraSensor(sensor_outputs, pos, quat, model, fovx, resolution)
+
+    def refresh_images(self):
+        if not self.cfg_base.ros.activate:
+            if len(self.cfg_base.debug.visualize) > 0 and not self.headless:
+                self.gym.clear_lines(self.viewer)
+            if self.headless:
+                self.gym.step_graphics(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+            self.gym.start_access_image_tensors(self.sim)
+            for camera_sensor in self.camera_dict.values():
+                camera_sensor.retrieve_images()
+            self.gym.end_access_image_tensors(self.sim)
