@@ -25,10 +25,12 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg = cfg
         self.cfg_base = self._acquire_base_cfg()
-        self.camera_dict = self._acquire_camera_dict()
+        
         self.controller = URDFRobot(self._asset_root, self.cfg_base.asset.robot)
 
         self.register_observations()
+
+        self.camera_dict = self._acquire_camera_dict()
 
         self.cfg["env"]["numActions"] = self._compute_num_actions()
         self.cfg["env"]["numObservations"], self.observations_start_end = self._compute_num_observations(cfg["env"]["observations"])
@@ -244,5 +246,37 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
         for env_index in env_indices:
             depth_np = ((-depth_tensor[env_index].cpu().numpy() / max_depth).clip(0.0, 1.0) * 255).astype(np.uint8)
             cv2.imshow(window_name + f" (Env {env_index})", depth_np)
+            cv2.waitKey(1)
+
+    def visualize_segmentation(self, segmentation_tensor: torch.Tensor, window_name: str = "segmentation", env_indices: Sequence[int] = (0,)) -> None:
+        def get_pascal_voc_colormap(max_num_classes: int):
+            def bitget(byteval, idx):
+                return (byteval & (1 << idx)) != 0
+
+            colormap = np.zeros((max_num_classes, 3), dtype=int)
+            for i in range(0, max_num_classes):
+                r = g = b = 0
+                c = i
+                for j in range(8):
+                    r = r | (bitget(c, 0) << 7 - j)
+                    g = g | (bitget(c, 1) << 7 - j)
+                    b = b | (bitget(c, 2) << 7 - j)
+                    c = c >> 3
+
+                colormap[i] = np.array([r, g, b])
+            return colormap
+        
+        colormap = get_pascal_voc_colormap(torch.max(segmentation_tensor) + 1)
+
+        rgb_tensor = torch.zeros_like(segmentation_tensor, dtype=torch.uint8).unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        for label in range(torch.max(segmentation_tensor) + 1):
+            print("label:", label)
+            print("colormap[label]:", colormap[label])
+            rgb_tensor[segmentation_tensor == label] = torch.tensor(colormap[label], dtype=torch.uint8).to(segmentation_tensor.device)
+        
+        for env_index in env_indices:
+            image_cv2 = cv2.cvtColor(rgb_tensor[env_index].cpu().numpy(), cv2.COLOR_RGB2BGR)
+            cv2.imshow(window_name + f" (Env {env_index})", image_cv2)
             cv2.waitKey(1)
 

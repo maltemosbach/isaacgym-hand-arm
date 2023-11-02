@@ -1,7 +1,8 @@
 
 from isaacgym import gymapi, gymutil
 from isaacgymenvs.tasks.hand_arm.base.base import HandArmBase
-from isaacgymenvs.tasks.hand_arm.base.observations import Callback, PointcloudObservation, VectorObservation
+from isaacgymenvs.tasks.hand_arm.base.observations import Callback, PointcloudObservation, LowDimObservation
+from functools import partial
 import hydra
 from omegaconf import DictConfig
 import numpy as np
@@ -13,6 +14,10 @@ from urdfpy import URDF
 import random
 import torch
 from scipy.spatial.transform import Rotation as R
+from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties
+import matplotlib.pyplot as plt
+from matplotlib.backend_bases import MouseButton
+from matplotlib.widgets import TextBox
 
 from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate
 
@@ -141,6 +146,15 @@ def generate_cuboid_bin_urdf(height, depth_width, file_path):
         f.write(urdf_string)
 
 
+
+
+def show_mask(mask, ax, random_color=False):
+    color = np.array([30/255, 144/255, 255/255, 0.6])
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+
+
 class ObjectAsset:
     def __init__(self, gym, sim, asset_root: str, asset_file: str) -> None:
         self._gym = gym
@@ -242,7 +256,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register object pose and velocity observations.
         self.register_observation(
             "object_pos", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_pos.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to save initial object poses and compute rewards.
@@ -255,7 +269,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "object_quat", 
-            VectorObservation(
+            LowDimObservation(
                 size=(4 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_quat.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to save initial object poses and compute rewards.
@@ -268,7 +282,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "object_linvel", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_linvel.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -280,7 +294,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "object_angvel", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_angvel.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -294,7 +308,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register object physical properties observations.
         self.register_observation(
             "object_mass", 
-            VectorObservation(
+            LowDimObservation(
                 size=(self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_mass,
                 callback=Callback(
@@ -304,7 +318,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "object_com", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_com.flatten(1, 2),
                 callback=Callback(
@@ -314,7 +328,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "object_inertia", 
-            VectorObservation(
+            LowDimObservation(
                 size=(9 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_inertia.flatten(1, 2),
                 callback=Callback(
@@ -326,7 +340,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register target object observations.
         self.register_observation(
             "target_object_pos", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3,),
                 as_tensor=lambda: self.target_object_pos,
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -339,7 +353,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "target_object_quat", 
-            VectorObservation(
+            LowDimObservation(
                 size=(4,),
                 as_tensor=lambda: self.target_object_quat,
                 callback=Callback(
@@ -353,7 +367,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register geometric object observations such as bounding boxes and synthetic point-clouds.
         self.register_observation(
             "object_bounding_box", 
-            VectorObservation(
+            LowDimObservation(
                 size=(10 * self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_bounding_box.flatten(1, 2),
                 callback=Callback(
@@ -365,7 +379,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "target_object_bounding_box", 
-            VectorObservation(
+            LowDimObservation(
                 size=(10,),
                 as_tensor=lambda: self.target_object_bounding_box,
                 callback=Callback(
@@ -433,7 +447,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register goal observations.
         self.register_observation(
             "goal_pos",
-            VectorObservation(
+            LowDimObservation(
                 size=(3,),
                 as_tensor=lambda: self.goal_pos,
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -445,7 +459,7 @@ class HandArmEnvMultiObject(HandArmBase):
         if self.cfg_task.rl.goal in ["throw", "oriented_reposition"]: # goal_quat either for the hand orientation or the goal bin orientation.
             self.register_observation(
                 "goal_quat",
-                VectorObservation(
+                LowDimObservation(
                     size=(3,),
                     as_tensor=lambda: self.goal_quat,
                     is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -458,7 +472,7 @@ class HandArmEnvMultiObject(HandArmBase):
         # Register task observation (observations that make desired bahaviors easier to learn).
         self.register_observation(
             "fingertip_to_target_object_pos", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.controller.fingertip_count,),
                 as_tensor=lambda: self.fingertip_to_target_object_pos.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -471,7 +485,7 @@ class HandArmEnvMultiObject(HandArmBase):
         )
         self.register_observation(
             "target_object_to_goal_pos",
-            VectorObservation(
+            LowDimObservation(
                 size=(3,),
                 as_tensor=lambda: self.target_object_to_goal_pos,
                 callback=Callback(
@@ -482,6 +496,53 @@ class HandArmEnvMultiObject(HandArmBase):
             )
         )
 
+        # Register camera observations that relate to the objects.
+        for camera_name in self.cfg_env.cameras:
+            self.register_observation(
+                f"{camera_name}_target_object-pointcloud", 
+                PointcloudObservation(
+                    camera_name=camera_name,
+                    key=f"{camera_name}_target_object-pointcloud", # NOTE: This is required to avoid overwriting the pointcloud of the entire scene.
+                    size=(self.cfg_env.pointclouds.max_num_points, 4),
+                    as_tensor=lambda: getattr(self, f"{camera_name}_target_object_pointcloud"),
+                    callback=Callback(
+                        on_init=lambda: setattr(self, f"{camera_name}_target_object_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                        on_step=lambda: self._refresh_segmented_pointcloud(camera_name=camera_name, tensor_name="_target_object_pointcloud", target_segmentation_id=self.target_object_index + 3),
+                    ),
+                    requires=[f"{camera_name}-pointcloud", f"{camera_name}-segmentation"],  # NOTE: The segmentation image is required to compute the points on the target object.
+                    visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_target_object_pointcloud"))
+                )
+            )
+            self.register_observation(
+                f"{camera_name}_target_object_initial-pointcloud", 
+                PointcloudObservation(
+                    camera_name=camera_name,
+                    key=f"{camera_name}_target_object_initial-pointcloud", # NOTE: This is required to avoid overwriting the pointcloud of the entire scene.
+                    size=(self.cfg_env.pointclouds.max_num_points, 4),
+                    as_tensor=lambda: getattr(self, f"{camera_name}_target_object_initial_pointcloud"),
+                    callback=Callback(
+                        on_init=lambda: setattr(self, f"{camera_name}_target_object_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                        on_reset=lambda: self._refresh_segmented_pointcloud(camera_name=camera_name, tensor_name="_target_object_initial_pointcloud", target_segmentation_id=self.target_object_index + 3),
+                    ),
+                    requires=[f"{camera_name}-pointcloud", f"{camera_name}-segmentation"],  # NOTE: The segmentation image is required to compute the points on the target object.
+                    visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_target_object_initial_pointcloud"))
+                )
+            )
+            self.register_observation(
+                f"{camera_name}_sam_initial-pointcloud", 
+                PointcloudObservation(
+                    camera_name=camera_name,
+                    key=f"{camera_name}_sam_initial-pointcloud", # NOTE: This is required to avoid overwriting the pointcloud of the entire scene.
+                    size=(self.cfg_env.pointclouds.max_num_points, 4),
+                    as_tensor=lambda: getattr(self, f"{camera_name}_sam_initial_pointcloud"),
+                    callback=Callback(
+                        on_init=lambda: setattr(self, f"{camera_name}_sam_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                        on_reset=lambda: self._refresh_sam_pointcloud(camera_name=camera_name),
+                    ),
+                    requires=[f"{camera_name}-pointcloud", f"{camera_name}-rgb"],  # NOTE: The segmentation image is required to compute the points on the target object.
+                    visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_sam_initial_pointcloud"))
+                )
+            )
 
     def _acquire_env_cfg(self) -> DictConfig:
         cfg_env = hydra.compose(config_name=self._env_cfg_path)['task']
@@ -602,7 +663,7 @@ class HandArmEnvMultiObject(HandArmBase):
             # Create goal actor.
             if self.cfg_task.rl.goal == "reposition":
                 if not self.headless:
-                    goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3)
+                    goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3 + self.cfg_env.objects.num_objects)
                     for rigid_body_index in range(self.gym.get_actor_rigid_body_count(env_ptr, goal_handle)):
                         self.gym.set_rigid_body_color(env_ptr, goal_handle, rigid_body_index, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0.0, 1.0, 0.0))
                     self.goal_handles.append(goal_handle)
@@ -610,7 +671,7 @@ class HandArmEnvMultiObject(HandArmBase):
                     actor_count += 1
             
             elif self.cfg_task.rl.goal == "throw":
-                goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3)
+                goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3 + self.cfg_env.objects.num_objects)
                 self.goal_handles.append(goal_handle)
                 self.goal_actor_indices.append(actor_count)
                 actor_count += 1
@@ -636,7 +697,7 @@ class HandArmEnvMultiObject(HandArmBase):
 
             # Create cameras.
             for camera in self.camera_dict.values():
-                camera.connect_simulation(self.gym, self.sim, env_ptr, self.device)
+                camera.connect_simulation(self.gym, self.sim, env_index, env_ptr, self.device, self.num_envs)
 
             # Create bin actor.
             if self.cfg_env.bin.asset != 'no_bin':
@@ -787,6 +848,107 @@ class HandArmEnvMultiObject(HandArmBase):
         self.object_synthetic_pointcloud_ordered[..., 0:3] *= self.object_synthetic_pointcloud_ordered[..., 3:].repeat(1, 1, 1, 3)  # Set points that are only padding to zero.
 
         self.object_synthetic_pointcloud[:] = self.object_synthetic_pointcloud_ordered[:, :, torch.randperm(self.cfg_env.pointclouds.max_num_points), :]  # Randomly permute points.
+    
+    def _refresh_segmented_pointcloud(self, camera_name: str, tensor_name: str, target_segmentation_id: torch.Tensor) -> None:
+        segmentation = self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION].flatten(1, 2)
+        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
+  
+        segmented_pointclouds = []
+        for env_index in range(self.num_envs):
+            target_object_mask = segmentation[env_index] == target_segmentation_id[env_index]
+            segmented_pointcloud = pointcloud[env_index][target_object_mask]
+
+            # More points are on the object than can fit into the padded point-cloud tensor. Subsample points.
+            if len(segmented_pointcloud) > self.cfg_env.pointclouds.max_num_points:
+                segmented_pointcloud = segmented_pointcloud[torch.randperm(len(segmented_pointcloud))[:self.cfg_env.pointclouds.max_num_points]]
+            
+            # Fewer points than the padded point-cloud tensor. Pad with zeros.
+            else:
+                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(target_object_pointcloud), 4)).to(self.device)))
+            segmented_pointclouds.append(segmented_pointcloud)
+        getattr(self, camera_name + tensor_name)[:] = torch.stack(segmented_pointclouds)
+
+    def _refresh_sam_pointcloud(self, camera_name: str) -> None:
+        rgb = self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB]
+        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
+
+        from PIL import Image
+        from lang_sam import LangSAM
+
+        self.lang_sam = LangSAM("vit_b", "/home/user/mosbach/tools/sam_tracking/sam_tracking/ckpt/sam_vit_b_01ec64.pth")  # TODO: Check if there is a better model available. Speed is really not an issue here.
+
+        segmented_pointclouds = []
+        for env_index in range(self.num_envs):
+            color_image_numpy = rgb[env_index].cpu().numpy()
+            self.input_points = []
+            self.input_labels = []
+            image_pil = Image.fromarray(color_image_numpy)
+
+            def update_mask_on_click(event):
+                if event.inaxes == ax_image:    
+                    self.input_points.append([event.xdata, event.ydata])
+                    self.input_labels.append(int(event.button == MouseButton.LEFT))
+                    self.lang_sam.sam.set_image(color_image_numpy)
+                    masks, scores, logits = self.lang_sam.sam.predict(point_coords=np.array(self.input_points).astype(np.int), point_labels=np.array(self.input_labels).astype(np.int), multimask_output=False)
+                    self.mask = masks[0]
+                    ax_image.imshow(color_image_numpy)
+                    show_mask(self.mask, ax_image)
+
+                    for point, label in zip(self.input_points, self.input_labels):
+                        col = 'green' if label == 1 else 'red'
+                        ax_image.scatter(point[0], point[1], color=col, edgecolors='white', s=50)
+                        
+                    sam_figure.canvas.draw()
+
+            def update_mask_on_text(text):
+                if text not in ['', 'Left-click to add positive marker, right-click to add negative marker.']:
+                    if len(self.input_points) > 0:
+                        print("Cannot use text input when markers have already been added.")
+                    else:
+                        masks, boxes, phrases, logits = self.lang_sam.predict(image_pil, text)
+                        self.mask = torch.any(masks, dim=0).cpu().numpy()
+
+                        #self.pred_mask, masked_frame = self.segtracker.detect_and_seg(color_image_numpy.copy(), text, 0.25, 0.25)
+                        #selected_segmentation = draw_mask(color_image_numpy.copy(), masks, id_countour=True)
+                        ax_image.imshow(color_image_numpy)
+                        show_mask(self.mask, ax_image)
+                        ax_image.axis('off')
+                        sam_figure.canvas.draw()
+
+            def on_hover_over_image(event):
+                if event.inaxes == ax_image and event.xdata is not None and event.ydata is not None:
+                    if text_box.text == "":
+                        text_box.set_val('Left-click to add positive marker, right-click to add negative marker.')
+                else:
+                    if text_box.text == 'Left-click to add positive marker, right-click to add negative marker.':
+                        text_box.set_val('')
+                sam_figure.canvas.draw()
+
+            sam_figure = plt.figure(num=f"Select target object for camera '{camera_name}' on env {env_index}.")
+            ax_image = sam_figure.add_subplot(111)
+            ax_image.axis('off')
+            sam_figure.subplots_adjust(bottom=0.2)
+            ax_prompt = plt.axes([0.1, 0.05, 0.8, 0.075])
+            text_box = TextBox(ax_prompt, "Text prompt:", initial="")
+            text_box.on_submit(update_mask_on_text)
+
+            ax_image.imshow(color_image_numpy)
+            sam_figure.canvas.mpl_connect('button_press_event', update_mask_on_click)
+            sam_figure.canvas.mpl_connect('motion_notify_event', on_hover_over_image)
+            plt.show()
+
+            target_object_mask = torch.from_numpy(self.mask).to(self.device).flatten(0, 1)
+            segmented_pointcloud = pointcloud[env_index][target_object_mask]
+
+            # More points are on the object than can fit into the padded point-cloud tensor. Subsample points.
+            if len(segmented_pointcloud) > self.cfg_env.pointclouds.max_num_points:
+                segmented_pointcloud = segmented_pointcloud[torch.randperm(len(segmented_pointcloud))[:self.cfg_env.pointclouds.max_num_points]]
+            
+            # Fewer points than the padded point-cloud tensor. Pad with zeros.
+            else:
+                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(target_object_pointcloud), 4)).to(self.device)))
+            segmented_pointclouds.append(segmented_pointcloud)
+        getattr(self, camera_name + "_sam_initial_pointcloud")[:] = torch.stack(segmented_pointclouds)
 
     def _acquire_object_mass(self) -> None:
         self.object_mass = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)

@@ -45,9 +45,10 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.reset)
 
         self.gym.simulate(self.sim)  # Simulate for one step and refresh base tensors to update the buffers (i.e. fingertip positions etc.)
-        self.refresh_base_tensors()
 
+        self.refresh_base_tensors()
         self._reset_buffers(env_ids)
+        self.reset_observation_tensors()
 
     def _reset_objects(self, env_ids):
         for i, object_index in enumerate(self.object_actor_env_indices):

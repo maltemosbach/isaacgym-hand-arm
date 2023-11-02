@@ -16,7 +16,7 @@ objects:
     noise: [0.15, 0.15, 0.1]
 
 bin:
-  asset: 'medium_bin'
+  asset: 'no_bin'
   pos: [0.28, 0.58, 0.001]
   quat: [0, 0, -0.707, 0.707]
 
@@ -27,7 +27,7 @@ cameras:
     quat: [ 0.09, 0.1, -0.707, 0.695 ]
     fovx: 87
     #resolution: [1920, 1080]
-    resolution: [64, 64]
+    resolution: [1024, 1024]
 
 pointclouds:
   average_num_points: 64

@@ -1,27 +1,11 @@
 from abc import ABC
 from dataclasses import dataclass, field, InitVar
-from enum import Enum
 from isaacgym import gymapi
+import matplotlib.pyplot as plt
 import networkx as nx
 import torch
 from typing import Callable, Dict, List, Tuple, Sequence
-
-
-# @dataclass
-# class Observation:
-#     size: Tuple[int, ...]
-#     data: Callable[[], torch.Tensor]
-#     key: str = field(default="obs")
-#     is_mandatory: bool = field(default=False)
-#     requires: List[str] = field(default_factory=list)
-#     acquire: Callable[[], None] = field(default=lambda: None)
-#     refresh: Callable[[], None] = field(default=lambda: None)
-#     visualize: Callable[[], None] = field(default=lambda: None)
-
-
-class ObservationKeys(Enum):
-    VECTOR = "obs"
-    POINTCLOUD = "pointcloud"
+from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties
 
 
 PASS = lambda: None
@@ -68,16 +52,16 @@ class Observation(ABC):
 
 @dataclass
 class DictObservation(Observation, ABC):
-    sort_index: int = field(init=False)
-        
-        
+    key: str = ""
+
+  
 
 @dataclass
-class VectorObservation(DictObservation):
+class LowDimObservation(DictObservation):
     def __post_init__(self, as_tensor: Callable[[], torch.Tensor]) -> None:
         super().__post_init__(as_tensor)
         if not len(self.size) == 1:
-            raise ValueError("Vector observations must be one-dimensional.")
+            raise ValueError("Low-dimensional observations must be one-dimensional.")
         
         self.key = "obs"
 
@@ -88,23 +72,36 @@ class CameraObservation(DictObservation, ABC):
 
 
 @dataclass
-class ImageObservation(CameraObservation):
+class RGBObservation(CameraObservation):
     def __post_init__(self, as_tensor: Callable[[], torch.Tensor]) -> None:
         super().__post_init__(as_tensor)
-        if not (len(self.size) == 3 and self.size[2] == 3):
-            raise ValueError("Image observations must be of shape [H, W, 3].")
+        #if not (self.size == (self.camera_dict[self.camera_name].height, self.camera_dict[self.camera_name].width, 3)):
+        #    raise ValueError("Image observations must be of shape [H, W, 3].")
         
-        self.key = f"{self.camera_name}_image"
+        if not self.key:
+            self.key = f"{self.camera_name}_image"
         
 
 @dataclass
 class DepthObservation(CameraObservation):
     def __post_init__(self, as_tensor: Callable[[], torch.Tensor]) -> None:
         super().__post_init__(as_tensor)
-        if not (len(self.size) == 2):
-            raise ValueError("Image observations must be of shape [H, W].")
+        #if not (self.size == (self.camera_dict[self.camera_name].height, self.camera_dict[self.camera_name].width)):
+        #    raise ValueError("Image observations must be of shape [H, W].")
         
-        self.key = f"{self.camera_name}_depth"
+        if not self.key:
+            self.key = f"{self.camera_name}_depth"
+
+
+@dataclass
+class SegmentationObservation(CameraObservation):
+    def __post_init__(self, as_tensor: Callable[[], torch.Tensor]) -> None:
+        super().__post_init__(as_tensor)
+        #if not (self.size == (self.camera_dict[self.camera_name].height, self.camera_dict[self.camera_name].width)):
+        #    raise ValueError("Image observations must be of shape [H, W].")
+        
+        if not self.key:
+            self.key = f"{self.camera_name}_segmentation"
         
 
 @dataclass
@@ -114,8 +111,8 @@ class PointcloudObservation(CameraObservation):
         if not self.size[-1] == 4:
             raise ValueError("Pointcloud observations must be of shape [..., 4].")
 
-        self.key = f"{self.camera_name}_pointcloud"
-
+        if not self.key:
+            self.key = f"{self.camera_name}_pointcloud"
 
 
 
@@ -138,7 +135,7 @@ class ObserverMixin:
         # Register DoF observations.
         self.register_observation(
             "actuated_dof_pos", 
-            VectorObservation(
+            LowDimObservation(
                 size=(self.controller.actuated_dof_count,),
                 as_tensor=lambda: self.actuated_dof_pos,
                 callback=Callback(
@@ -149,7 +146,7 @@ class ObserverMixin:
         )
         self.register_observation(
             "actuated_dof_vel", 
-            VectorObservation(
+            LowDimObservation(
                 size=(self.controller.actuated_dof_count,),
                 as_tensor=lambda: self.actuated_dof_vel,
                 callback=Callback(
@@ -162,7 +159,7 @@ class ObserverMixin:
         # Register fingertip keypoints observations.
         self.register_observation(
             "fingertip_pos", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.controller.fingertip_count,),
                 as_tensor=lambda: self.fingertip_pos.flatten(1, 2),
                 is_mandatory=True,  # NOTE: Required to compute rewards.
@@ -175,7 +172,7 @@ class ObserverMixin:
         )
         self.register_observation(
             "fingertip_quat", 
-            VectorObservation(
+            LowDimObservation(
                 size=(4 * self.controller.fingertip_count,),
                 as_tensor=lambda: self.fingertip_quat.flatten(1, 2),
                 callback=Callback(
@@ -187,7 +184,7 @@ class ObserverMixin:
         )
         self.register_observation(
             "fingertip_linvel", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.controller.fingertip_count,),
                 as_tensor=lambda: self.fingertip_linvel.flatten(1, 2),
                 callback=Callback(
@@ -198,7 +195,7 @@ class ObserverMixin:
         )
         self.register_observation(
             "fingertip_angvel", 
-            VectorObservation(
+            LowDimObservation(
                 size=(3 * self.controller.fingertip_count,),
                 as_tensor=lambda: self.fingertip_angvel.flatten(1, 2),
                 callback=Callback(
@@ -209,18 +206,18 @@ class ObserverMixin:
         )
 
     def register_camera_observations(self) -> None:
-        for observation_name in self.cfg_task.env.observations:
-            if any(observation_name.startswith(camera_name) for camera_name in self.cfg_env.cameras):
-                camera_name, image_type = observation_name.split("-")
-
-                if image_type == "image":
+        for camera_name in self.cfg_env.cameras:
+            camera_properties = CameraSensorProperties(**self.cfg_env.cameras[camera_name], image_types=["rgb"])
+            for image_type in ["rgb", "depth", "segmentation", "pointcloud"]:
+                observation_name = f"{camera_name}-{image_type}"
+                if image_type == "rgb":
                     self.register_observation(
                         observation_name, 
-                        ImageObservation(
+                        RGBObservation(
                             camera_name=camera_name,
-                            size=(self.camera_dict[camera_name].height, self.camera_dict[camera_name].width, 3),
-                            as_tensor=lambda: self.camera_dict[camera_name].get_image(),
-                            visualize=lambda: self.visualize_image(self.camera_dict[camera_name].get_image(), window_name=observation_name),
+                            size=(camera_properties.height, camera_properties.width, 3),
+                            as_tensor=lambda: self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB],
+                            visualize=lambda: self.visualize_image(self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB], window_name=observation_name),
                         )
                     )
                 elif image_type == "depth":
@@ -228,9 +225,19 @@ class ObserverMixin:
                         observation_name, 
                         DepthObservation(
                             camera_name=camera_name,
-                            size=(self.camera_dict[camera_name].height, self.camera_dict[camera_name].width),
-                            as_tensor=lambda: self.camera_dict[camera_name].get_depth(),
-                            visualize=lambda: self.visualize_depth(self.camera_dict[camera_name].get_depth(), window_name=observation_name)
+                            size=(camera_properties.height, camera_properties.width),
+                            as_tensor=lambda: self.camera_dict[camera_name].current_sensor_observation[ImageType.DEPTH],
+                            visualize=lambda: self.visualize_depth(self.camera_dict[camera_name].current_sensor_observation[ImageType.DEPTH], window_name=observation_name)
+                        )
+                    )
+                elif image_type == "segmentation":
+                    self.register_observation(
+                        observation_name, 
+                        SegmentationObservation(
+                            camera_name=camera_name,
+                            size=(camera_properties.height, camera_properties.width),
+                            as_tensor=lambda: self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION],
+                            visualize=lambda: self.visualize_segmentation(self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION], window_name=observation_name)
                         )
                     )
                 elif image_type == "pointcloud":
@@ -238,13 +245,11 @@ class ObserverMixin:
                         observation_name, 
                         PointcloudObservation(
                             camera_name=camera_name,
-                            size=(self.camera_dict[camera_name].width * self.camera_dict[camera_name].height, 4),
-                            as_tensor=lambda: self.camera_dict[camera_name].get_pointcloud(),
-                            visualize=lambda: self.visualize_points(self.camera_dict[camera_name].get_pointcloud())
+                            size=(camera_properties.height, camera_properties.width, 4),
+                            as_tensor=lambda: self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD],
+                            visualize=lambda: self.visualize_points(self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD])
                         )
                     )
-                else:
-                    assert False, f"Unknown image type {image_type}."
 
     @property
     def observation_dependency_graph(self) -> nx.DiGraph:
@@ -257,9 +262,19 @@ class ObserverMixin:
         
         return nx.DiGraph(dependency_dict)
     
+
+    @property
+    def ordered_observations(self) -> List[str]:
+        return self._mandatory_observations + list(reversed(list(nx.topological_sort(self.observation_dependency_graph))))
+    
     def _compute_num_observations(self, observations: List[str]) -> Tuple[int, Dict[str, Tuple[int, int]]]:
         num_observations = 0
         observations_start_end = {}
+
+        print("self._observations", self._observations.keys())
+        #nx.draw_networkx(self.observation_dependency_graph)
+
+        #plt.show()
 
         for observation_name in observations:
             if observation_name in self.cfg_env.cameras.keys():
@@ -290,8 +305,6 @@ class ObserverMixin:
         self.fingertip_body_env_indices = [self.gym.find_actor_rigid_body_index(
             self.env_ptrs[0], self.controller_handles[0], ft_body_name, gymapi.DOMAIN_ENV
         ) for ft_body_name in self.controller.fingertip_body_names]
-
-        self.ordered_observations = self._mandatory_observations + list(reversed(list(nx.topological_sort(self.observation_dependency_graph))))
 
         for observation_name in self.ordered_observations:
             self._observations[observation_name].callback.on_init()

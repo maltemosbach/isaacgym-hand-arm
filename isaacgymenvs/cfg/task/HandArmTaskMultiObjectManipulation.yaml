@@ -23,7 +23,7 @@ env:
     
     proprioceptive_observations: ['actuated_dof_pos', 'actuated_dof_vel', 'fingertip_pos', 'fingertip_quat']
     object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box' ]
-    task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos', ]
+    task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos', 'frontview_sam_initial-pointcloud']
     observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
 
     #observations: ["actuated_dof_pos", "actuated_dof_vel", "fingertip_pos", "fingertip_quat", "object_pos", "object_bounding_box", "target_object_bounding_box", "fingertip_to_target_object_pos", "target_object_to_goal_pos"]
