@@ -244,7 +244,11 @@ class ObjectAsset:
 
 
 class HandArmEnvMultiObject(HandArmBase):
-    _env_cfg_path = 'task/HandArmEnvMultiObject.yaml'
+    _env_cfg_path: str = 'task/HandArmEnvMultiObject.yaml'
+
+    _padding_semantic_id: int = 0
+    _regular_semantic_id: int = 1
+    _target_semantic_id: int = 2
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg_env = self._acquire_env_cfg()
@@ -407,12 +411,12 @@ class HandArmEnvMultiObject(HandArmBase):
             PointcloudObservation(
                 camera_name="object_synthetic_initial",
                 size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4,),
-                as_tensor=lambda: self.object_synthetic_pointcloud_initial,
+                as_tensor=lambda: self.object_synthetic_pointcloud_initial[torch.arange(self.num_envs), self.object_configuration_indices],
                 requires=["object_synthetic-pointcloud"],
                 callback=Callback(
-                    on_init=lambda: setattr(self, "object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),  # NOTE: Initial object observations are overwritten automatically once after the objects have been dropped.
+                    on_init=lambda: setattr(self, "object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.objects.drop.num_initial_poses, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),  # NOTE: Initial object observations are overwritten automatically once after the objects have been dropped.
                 ),
-                visualize=lambda: self.visualize_points(self.object_synthetic_pointcloud_initial, size=0.0025)
+                visualize=lambda: self.visualize_points(self.object_synthetic_pointcloud_initial[torch.arange(self.num_envs), self.object_configuration_indices], size=0.0025)
             )
         )
         self.register_observation(
@@ -424,7 +428,7 @@ class HandArmEnvMultiObject(HandArmBase):
                 requires=["object_synthetic-pointcloud"],
                 callback=Callback(
                     on_init=lambda: setattr(self, "target_object_synthetic_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
-                    on_step=lambda: self.target_object_synthetic_pointcloud.copy_(self.object_synthetic_pointcloud.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),
+                    on_step=self._refresh_target_object_synthetic_pointcloud,
                 ),
                 visualize=lambda: self.visualize_points(self.target_object_synthetic_pointcloud, size=0.0025)
             )
@@ -438,9 +442,9 @@ class HandArmEnvMultiObject(HandArmBase):
                 requires=["object_synthetic_initial-pointcloud"],
                 callback=Callback(
                     on_init=lambda: setattr(self, "target_object_synthetic_pointcloud_initial", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
-                    on_reset=lambda: self.target_object_synthetic_pointcloud_initial.copy_(self.object_synthetic_pointcloud_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),  # NOTE: Initial observations of the target object must only be refreshed on resets and do not change during the episode.
+                    on_reset=lambda: self.target_object_synthetic_pointcloud_initial.copy_(self.object_synthetic_pointcloud_initial[torch.arange(self.num_envs), self.object_configuration_indices].gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)),  # NOTE: Initial observations of the target object must only be refreshed on resets and do not change during the episode.
                 ),
-                visualize=lambda: self.visualize_points(self.target_object_synthetic_pointcloud, size=0.0025)
+                visualize=lambda: self.visualize_points(self.target_object_synthetic_pointcloud_initial, size=0.0025)
             )
         )
 
@@ -522,7 +526,7 @@ class HandArmEnvMultiObject(HandArmBase):
                     as_tensor=lambda: getattr(self, f"{camera_name}_target_object_initial_pointcloud"),
                     callback=Callback(
                         on_init=lambda: setattr(self, f"{camera_name}_target_object_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
-                        on_reset=lambda: self._refresh_segmented_pointcloud(camera_name=camera_name, tensor_name="_target_object_initial_pointcloud", target_segmentation_id=self.target_object_index + 3),
+                        on_reset=lambda: self._refresh_segmented_pointcloud(camera_name=camera_name, tensor_name="_target_object_initial_pointcloud", target_segmentation_id=self.target_object_index + 3, pointcloud_id=2),
                     ),
                     requires=[f"{camera_name}-pointcloud", f"{camera_name}-segmentation"],  # NOTE: The segmentation image is required to compute the points on the target object.
                     visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_target_object_initial_pointcloud"))
@@ -543,6 +547,75 @@ class HandArmEnvMultiObject(HandArmBase):
                     visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_sam_initial_pointcloud"))
                 )
             )
+
+        # Register synthetic pointcloud observations that extend the object-pointclouds with scene elements.
+        self.register_observation(
+            "robot_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="robot_synthetic",
+                size=(sum(self.controller.num_body_surface_samples), 4,),
+                as_tensor=lambda: self.robot_synthetic_pointcloud,
+                callback=Callback(
+                    on_init=self._acquire_robot_synthetic_pointcloud,
+                    on_step=self._refresh_robot_synthetic_pointcloud,
+                ),
+                visualize=lambda: self.visualize_points(self.robot_synthetic_pointcloud, size=0.0025)
+            )
+        )
+        table_pointcloud_size = 128
+        self.register_observation(
+            "table_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="table_synthetic",
+                size=(table_pointcloud_size, 4),
+                as_tensor=lambda: self.table_synthetic_pointcloud,
+                callback=Callback(
+                    on_init=lambda: self._acquire_table_synthetic_pointcloud(num_samples=table_pointcloud_size),
+                ),
+                visualize=lambda: self.visualize_points(self.table_synthetic_pointcloud, size=0.0025)
+            )
+        )
+        workspace_pointcloud_size = 128
+        self.register_observation(
+            "workspace_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="workspace_synthetic",
+                size=(workspace_pointcloud_size, 4),
+                as_tensor=lambda: self.workspace_synthetic_pointcloud,
+                callback=Callback(
+                    on_init=lambda: self._acquire_workspace_synthetic_pointcloud(num_samples=table_pointcloud_size),
+                ),
+                visualize=lambda: self.visualize_points(self.workspace_synthetic_pointcloud, size=0.0025)
+            )
+        )
+
+        self.register_observation(
+            "bin_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="bin_synthetic",
+                size=(128, 4),
+                as_tensor=lambda: self.bin_synthetic_pointcloud,
+                callback=Callback(
+                    on_init=lambda: self._acquire_bin_synthetic_pointcloud(num_samples=128),
+                ),
+                visualize=lambda: self.visualize_points(self.bin_synthetic_pointcloud, size=0.0025)
+            )
+        )
+        self.register_observation(
+            "scene_synthetic-pointcloud",
+            PointcloudObservation(
+                camera_name="scene_synthetic",
+                size=((self.cfg_env.pointclouds.max_num_points * self.cfg_env.objects.num_objects) + workspace_pointcloud_size + sum(self.controller.num_body_surface_samples), 4),
+                as_tensor=lambda: self.scene_synthetic_pointcloud,
+                requires=["object_synthetic-pointcloud", "workspace_synthetic-pointcloud", "robot_synthetic-pointcloud"],
+                callback=Callback(
+                    on_init=lambda: setattr(self, "scene_synthetic_pointcloud", torch.zeros((self.num_envs, (self.cfg_env.pointclouds.max_num_points * self.cfg_env.objects.num_objects) + table_pointcloud_size + sum(self.controller.num_body_surface_samples), 4)).to(self.device)),
+                    on_step=lambda: self.scene_synthetic_pointcloud.copy_(torch.cat([self.object_synthetic_pointcloud.flatten(1, 2), self.workspace_synthetic_pointcloud, self.robot_synthetic_pointcloud], dim=1)),
+                ),
+                visualize=lambda: self.visualize_points(self.scene_synthetic_pointcloud, size=0.0025)
+            )
+        )
+
 
     def _acquire_env_cfg(self) -> DictConfig:
         cfg_env = hydra.compose(config_name=self._env_cfg_path)['task']
@@ -662,13 +735,12 @@ class HandArmEnvMultiObject(HandArmBase):
 
             # Create goal actor.
             if self.cfg_task.rl.goal == "reposition":
-                if not self.headless:
-                    goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3 + self.cfg_env.objects.num_objects)
-                    for rigid_body_index in range(self.gym.get_actor_rigid_body_count(env_ptr, goal_handle)):
-                        self.gym.set_rigid_body_color(env_ptr, goal_handle, rigid_body_index, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0.0, 1.0, 0.0))
-                    self.goal_handles.append(goal_handle)
-                    self.goal_actor_indices.append(actor_count)
-                    actor_count += 1
+                goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3 + self.cfg_env.objects.num_objects)
+                for rigid_body_index in range(self.gym.get_actor_rigid_body_count(env_ptr, goal_handle)):
+                    self.gym.set_rigid_body_color(env_ptr, goal_handle, rigid_body_index, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0.0, 1.0, 0.0))
+                self.goal_handles.append(goal_handle)
+                self.goal_actor_indices.append(actor_count)
+                actor_count += 1
             
             elif self.cfg_task.rl.goal == "throw":
                 goal_handle = self.gym.create_actor(env_ptr, goal_asset, gymapi.Transform(), "goal", self.num_envs, 0, 3 + self.cfg_env.objects.num_objects)
@@ -679,9 +751,9 @@ class HandArmEnvMultiObject(HandArmBase):
             # Aggregate all actors.
             max_rigid_bodies = self.controller.rigid_body_count + objects_rigid_body_count
             max_rigid_shapes = self.controller.rigid_shape_count + objects_rigid_shape_count
-            if not self.headless:
-                max_rigid_bodies += goal_rigid_body_count
-                max_rigid_shapes += goal_rigid_shape_count
+
+            max_rigid_bodies += goal_rigid_body_count
+            max_rigid_shapes += goal_rigid_shape_count
 
             if self.cfg_env.bin.asset != 'no_bin':
                 max_rigid_bodies += bin_rigid_body_count
@@ -731,6 +803,8 @@ class HandArmEnvMultiObject(HandArmBase):
 
         self.goal_actor_indices = torch.tensor(self.goal_actor_indices, dtype=torch.int32, device=self.device)
         self.goal_actor_env_index = self.gym.find_actor_index(env_ptr, "goal", gymapi.DOMAIN_ENV)
+
+        self.object_configuration_indices = torch.zeros((self.num_envs,), dtype=torch.int64, device=self.device)
 
         # self.controller_actor_id_env = self.gym.find_actor_index(
         #     env_ptr, 'robot', gymapi.DOMAIN_ENV)
@@ -789,6 +863,11 @@ class HandArmEnvMultiObject(HandArmBase):
 
     def visualize_goal_bin_extent(self) -> None:
         self.visualize_bounding_boxes(self.goal_pos, self.goal_quat, 2 * self.goal_bin_half_extent.unsqueeze(0).repeat(self.num_envs, 1))
+
+    def visualize_workspace_extent(self) -> None:
+        for env_id in range(self.num_envs):
+            bbox = gymutil.WireframeBBoxGeometry(torch.tensor(self.cfg_env.workspace), pose=gymapi.Transform(), color=(0, 1, 1))
+            gymutil.draw_lines(bbox, self.gym, self.viewer, self.env_ptrs[env_id], pose=gymapi.Transform())
 
     def _acquire_object_bounding_box(self) -> None:
         self.object_bounding_box = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, 10)).to(self.device)  # [pos, quat, extents] with shape (num_envs, num_objects_per_bin, 10)
@@ -849,9 +928,63 @@ class HandArmEnvMultiObject(HandArmBase):
 
         self.object_synthetic_pointcloud[:] = self.object_synthetic_pointcloud_ordered[:, :, torch.randperm(self.cfg_env.pointclouds.max_num_points), :]  # Randomly permute points.
     
-    def _refresh_segmented_pointcloud(self, camera_name: str, tensor_name: str, target_segmentation_id: torch.Tensor) -> None:
+    def _refresh_target_object_synthetic_pointcloud(self) -> None:
+        self.target_object_synthetic_pointcloud[:] = self.object_synthetic_pointcloud.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)
+        self.target_object_synthetic_pointcloud[..., 3] *= self._target_semantic_id
+
+    def _acquire_robot_synthetic_pointcloud(self) -> None:
+        self.robot_body_env_indices = [self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.controller_handles[0], body_name, gymapi.DOMAIN_ENV) for body_name in self.controller.body_areas.keys()]
+        self.robot_body_pos = self.body_pos[:, self.robot_body_env_indices, 0:3]
+        self.robot_body_quat = self.body_quat[:, self.robot_body_env_indices, 0:4]
+
+        self.robot_surface_samples = []
+        for body_index, body_mesh in enumerate(self.controller.body_meshes):
+            current_body_surface_samples = self.controller.body_surface_samples[body_index]
+            current_body_surface_samples = torch.from_numpy(current_body_surface_samples).to(self.device, dtype=torch.float32)
+            self.robot_surface_samples.append(current_body_surface_samples.unsqueeze(0).repeat(self.num_envs, 1, 1))
+
+        self.robot_synthetic_pointcloud = torch.zeros((self.num_envs, sum(self.controller.num_body_surface_samples), 4)).to(self.device)  # shape: (num_envs, num_robot_points, 4)
+        self.robot_synthetic_pointcloud[:, :, 3] = 1
+
+    def _refresh_robot_synthetic_pointcloud(self) -> None:
+        # Refresh robot body poses.
+        self.robot_body_pos[:] = self.body_pos[:, self.robot_body_env_indices, 0:3]
+        self.robot_body_quat[:] = self.body_quat[:, self.robot_body_env_indices, 0:4]
+
+        prev_index = 0
+        for body_index, num_samples in enumerate(self.controller.num_body_surface_samples):
+            self.robot_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3] = self.robot_body_pos[:, body_index].unsqueeze(1).repeat(1, num_samples, 1) + quat_apply(self.robot_body_quat[:, body_index].unsqueeze(1).repeat(1, num_samples, 1), self.robot_surface_samples[body_index])
+            prev_index += num_samples
+
+        # Check for in-workspace and set validity.
+        is_valid = self.robot_synthetic_pointcloud[:, :, 0] >= self.cfg_env.workspace[0][0]
+        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 0] <= self.cfg_env.workspace[1][0])
+        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 1] >= self.cfg_env.workspace[0][1])
+        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 1] <= self.cfg_env.workspace[1][1])
+        self.robot_synthetic_pointcloud[:, :, 3] = is_valid.float()
+
+    def _acquire_table_synthetic_pointcloud(self, num_samples: int) -> None:
+        self.table_synthetic_pointcloud = torch.zeros((self.num_envs, num_samples, 4)).to(self.device)
+        self.table_synthetic_pointcloud[:, :, 0].uniform_(-0.07, 0.63)
+        self.table_synthetic_pointcloud[:, :, 1].uniform_(-0.17, 0.83)
+        self.table_synthetic_pointcloud[:, :, 3] = 1
+
+    def _acquire_workspace_synthetic_pointcloud(self, num_samples: int) -> None:
+        self.workspace_synthetic_pointcloud = torch.zeros((self.num_envs, num_samples, 4)).to(self.device)
+        self.workspace_synthetic_pointcloud[:, :, 0].uniform_(-0.07, 0.63)
+        self.workspace_synthetic_pointcloud[:, :, 1].uniform_(0.23, 0.83)
+        self.workspace_synthetic_pointcloud[:, :, 3] = 1
+
+    def _acquire_bin_synthetic_pointcloud(self, num_samples: int) -> None:
+        self.bin_body_env_index = self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.bin_handles[0], body_name, gymapi.DOMAIN_ENV)
+
+    
+    def _refresh_segmented_pointcloud(self, camera_name: str, tensor_name: str, target_segmentation_id: torch.Tensor, pointcloud_id: int = 1) -> None:
         segmentation = self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION].flatten(1, 2)
-        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
+        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].clone().detach().flatten(1, 2)
+
+        # Segmentation gets a semantic value of 2 compared to the base value of 1.
+        pointcloud[:, :, 3] *= self._target_semantic_id
   
         segmented_pointclouds = []
         for env_index in range(self.num_envs):
@@ -864,9 +997,10 @@ class HandArmEnvMultiObject(HandArmBase):
             
             # Fewer points than the padded point-cloud tensor. Pad with zeros.
             else:
-                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(target_object_pointcloud), 4)).to(self.device)))
+                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(segmented_pointcloud), 4)).to(self.device)))
             segmented_pointclouds.append(segmented_pointcloud)
         getattr(self, camera_name + tensor_name)[:] = torch.stack(segmented_pointclouds)
+        getattr(self, camera_name + tensor_name)[:, :, 3] *= pointcloud_id  # Used to set the pointcloud id of initial observations to a different one for example.
 
     def _refresh_sam_pointcloud(self, camera_name: str) -> None:
         rgb = self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB]

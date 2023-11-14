@@ -99,6 +99,10 @@ def launch_rlg_hydra(cfg: DictConfig):
     from isaacgymenvs.learning import amp_network_builder
     import isaacgymenvs
 
+    from cpd.dagger_continuous import DAggerAgent
+    from cpd.network import actor_network_builder, pointcloud_actor_network_builder
+    from cpd.dictobs_player import PpoDictObsPlayerContinuous
+
 
     time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"{cfg.wandb_name}_{time_str}"
@@ -189,6 +193,12 @@ def launch_rlg_hydra(cfg: DictConfig):
         runner.player_factory.register_builder('amp_continuous', lambda **kwargs : amp_players.AMPPlayerContinuous(**kwargs))
         model_builder.register_model('continuous_amp', lambda network, **kwargs : amp_models.ModelAMPContinuous(network))
         model_builder.register_network('amp', lambda **kwargs : amp_network_builder.AMPBuilder())
+
+        model_builder.register_network('actor', lambda **kwargs : actor_network_builder.ActorBuilder(**kwargs))
+        model_builder.register_network('pointcloud_actor', lambda **kwargs : pointcloud_actor_network_builder.PointcloudActorBuilder(**kwargs))
+
+        runner.algo_factory.register_builder('dagger_continuous', lambda **kwargs : DAggerAgent(**kwargs))
+        runner.player_factory.register_builder('dagger_continuous', lambda **kwargs : PpoDictObsPlayerContinuous(**kwargs))
 
         return runner
 

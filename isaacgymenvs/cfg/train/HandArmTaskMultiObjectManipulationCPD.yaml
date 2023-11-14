@@ -1,0 +1,88 @@
+# Student parameters are initialzed with default PPO parameters, but can be adjusted to differentiate the student from the teacher.
+defaults: 
+  - HandArmTaskMultiObjectManipulationPPO
+
+params:
+  algo:
+    name: dagger_continuous  # Select DAgger as the algorithm to be run.
+
+  config:
+    learning_rate: 5e-4
+    lr_schedule: None  # Learning rate scheduling is intended for RL algorithms. Use fixed learning rate for DAgger.
+    minibatch_size: ${....task.env.numEnvs}  # Irrelevant as the regular actor loss is not used.
+    horizon_length: 8  # Number of steps to run before updating the policy.
+    mini_epochs: 2  # Number of mini_epochs of updates to perform.
+
+  # Overwrite network configuration to differentiate student architecture from teacher architecture.
+  network:
+      name: pointcloud_actor  # Employ CPD ActorNetwork
+      separate: False
+
+      #context_variables: "initial_*"
+
+      pointcloud:
+        normalize: False
+        encoder: "minkowski_network"
+        embed_size: 256
+        processing_mode: "merge"  # Possible values: merge, shared_encoder, separate_encoders
+
+      space:
+        continuous:
+          mu_activation: None
+          sigma_activation: None
+          mu_init:
+            name: default
+          sigma_init:
+            name: const_initializer
+            val: 0
+          fixed_sigma: True
+        
+      mlp:
+        units: [768, 512, 256]
+        activation: elu
+        d2rl: False
+
+        initializer:
+          name: default
+        regularizer:
+          name: None
+      
+      #rnn:
+      #  name: lstm
+      #  units: 256
+      #  layers: 1
+      #  before_mlp: False
+      #  concat_input: True
+      #  layer_norm: True
+
+      #transformer:
+      #  name: transformer
+      #  embed_size: 256
+      #  heads: 4
+      #  layers: 1
+      #  before_mlp: False
+      #  concat_input: True
+      #  layer_norm: True
+
+
+  teacher_checkpoint:
+    load_checkpoint: ${if:${....teacher_checkpoint},True,False}
+    load_path: ${....teacher_checkpoint}
+
+  dataset:
+    train_valid_split: 0.95
+
+    train:
+      capacity: 10000001
+      minibatch_size: 1024
+      sequence_len: 1
+
+    validation:
+      capacity: 500001
+      minibatch_size: ${..train.minibatch_size}
+      sequence_len: ${..train.sequence_len}
+
+  training:
+    mini_epochs: 10
+    validate_every: 10
+

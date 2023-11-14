@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
+import cv2
 from dataclasses import dataclass, field
 from enum import Enum
 import itertools
@@ -71,7 +72,6 @@ def global_to_environment_points(points: torch.Tensor, env_spacing: float = 1.):
         points[env_index, ..., 0] -= column * 2 * env_spacing
         points[env_index, ..., 1] -= row * 2 * env_spacing
     return points
-
 
 
 
@@ -281,10 +281,14 @@ class IsaacGymCameraSensor(CameraSensor):
             self.current_sensor_observation[ImageType.POINTCLOUD][:] = self._compute_pointcloud()
 
     def _compute_pointcloud(self, max_depth: float = 10) -> torch.Tensor:
+        x_range = [-0.07, 0.63]
+        y_range = [0.23, 0.83]
         is_valid = (self.current_sensor_observation[ImageType.DEPTH] > -max_depth).to(self.device).unsqueeze(-1)
         depth_image = torch.clamp(self.current_sensor_observation[ImageType.DEPTH], min=-max_depth)  # Clamp to avoid NaNs.
         global_points = depth_image_to_global_points(depth_image, self.projection_matrix, self.view_matrix, self.device)
         points = global_to_environment_points(global_points)
+        in_workspace = ((points[..., 0] > x_range[0]) & (points[..., 0] < x_range[1]) & (points[..., 1] > y_range[0]) & (points[..., 1] < y_range[1])).unsqueeze(-1)
+        is_valid = is_valid & in_workspace
         return torch.cat([points, is_valid], dim=-1)
 
     @property
@@ -382,3 +386,58 @@ class CameraMixin:
                 camera_sensor.refresh_outside_gpu_access()
         else:
             assert False
+
+        
+        if self.cfg_base.debug.camera.save_recordings:
+            self._write_recordings()
+
+    def _write_recordings(self) -> None:
+        # Initialize recordings dict.
+        if not hasattr(self, '_recordings_dict'):
+            self._recordings_dict = {}
+            self._episode_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+            experiment_dir = os.path.join('runs', self.cfg['full_experiment_name'])
+            self._recordings_dir = os.path.join(experiment_dir, 'videos')
+
+            for camera_name, camera_sensor in self.camera_dict.items():
+                self._recordings_dict[camera_name] = {}
+                for image_type in camera_sensor.image_types:
+                    self._recordings_dict[camera_name][image_type] = [[] for _ in range(self.num_envs)]
+
+        # Append current sensor observations to recordings dict.
+        for camera_name, camera_sensor in self.camera_dict.items():
+            for image_type in camera_sensor.image_types:
+                for env_index in range(self.num_envs):
+                    image_np = camera_sensor.current_sensor_observation[image_type][env_index].cpu().numpy()
+                    if image_type == ImageType.RGB:
+                            self._recordings_dict[camera_name][image_type][env_index].append(image_np[..., ::-1])
+                    elif image_type == ImageType.DEPTH:
+                            depth_range = (0, 2.5)
+                            image_np = np.clip(-image_np, *depth_range)
+                            image_np = (image_np - depth_range[0]) / (depth_range[1] - depth_range[0])
+                            image_np = (np.stack([image_np] * 3, axis=-1) * 255).astype(np.uint8)
+                            self._recordings_dict[camera_name][image_type][env_index].append(image_np)
+
+                            # TODO: Implement generic depth and segmentation to RGB mappings as I have already used for the visualization functions.
+                else:
+                    raise NotImplementedError
+        
+        # Write recordings to file at the end of the episode.
+        fps = 1 / (self.cfg_base.sim.dt * self.cfg_task.env.controlFrequencyInv)
+        done_env_indices = self.reset_buf.nonzero(as_tuple=False).flatten()
+        if len(done_env_indices) > 0:
+            for done_env_index in done_env_indices:
+                self._episode_count[done_env_index] += 1
+                for camera_name, camera_sensor in self.camera_dict.items():
+                    for image_type in self.camera_sensor.image_types:
+                        video_writer = cv2.VideoWriter(
+                            os.path.join(
+                                self._recordings_dir, f"{camera_name}_{image_type}_env_{env_index}_episode_{self._episode_count[env_index]}.mp4"
+                            ),
+                            self.fourcc, fps, (camera_sensor.width, camera_sensor.height)
+                        )
+                        for image_np in self._recordings_dict[camera_name][image_type][env_index]:
+                            video_writer.write(image_np)
+                        video_writer.release()
+                        
+                        self._recordings_dict[camera_name][image_type][env_index] = []

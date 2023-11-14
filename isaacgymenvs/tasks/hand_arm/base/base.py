@@ -2,7 +2,7 @@ import hydra
 from omegaconf import DictConfig
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgymenvs.tasks.base.vec_task import VecTask
-from isaacgymenvs.tasks.hand_arm.base.actions import ActorMixin
+from isaacgymenvs.tasks.hand_arm.base.actions import ActorMixin, Robot
 from isaacgymenvs.tasks.hand_arm.base.camera_sensor import CameraMixin
 from isaacgymenvs.tasks.hand_arm.base.logger import LoggerMixin
 from isaacgymenvs.tasks.hand_arm.base.observations import ObserverMixin
@@ -26,17 +26,26 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
         self.cfg = cfg
         self.cfg_base = self._acquire_base_cfg()
         
-        self.controller = URDFRobot(self._asset_root, self.cfg_base.asset.robot)
+        #self.controller = URDFRobot(self._asset_root, self.cfg_base.asset.robot)
+        self.controller = Robot(self._asset_root, self.cfg_base.asset)
+
+        self.all_observations = cfg["env"]["observations"]
+        if "teacher_observations" in cfg["env"].keys():
+            self.all_observations = list(set(self.all_observations + cfg["env"]["teacher_observations"]))
 
         self.register_observations()
-
-        self.camera_dict = self._acquire_camera_dict()
+        self.finalize_observations()
 
         self.cfg["env"]["numActions"] = self._compute_num_actions()
         self.cfg["env"]["numObservations"], self.observations_start_end = self._compute_num_observations(cfg["env"]["observations"])
+
         if "teacher_observations" in cfg["env"].keys():
             self.cfg["env"]["numTeacherObservations"], self.teacher_observations_start_end = self._compute_num_observations(cfg["env"]["teacher_observations"])
+        
+        
         self.headless = headless
+
+        self.camera_dict = self._acquire_camera_dict()
         
 
         if self.cfg_base.ros.activate:
@@ -95,7 +104,7 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
                                       physics_engine=self.physics_engine,
                                       sim_params=self.sim_params)
         self._create_ground_plane()
-        self.controller.attach_simulation(self.gym, self.sim, self.cfg_base.asset.dof_properties, self.device)
+        self.controller.attach_simulation(self.gym, self.sim, self.device)
         self._create_envs()  # defined in subclass
 
     def pre_physics_step(self, actions: torch.Tensor) -> None:
@@ -167,7 +176,7 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
     def draw_visualizations(self, visualizations: List[str]) -> None:
         for visualization in visualizations:
             # If an observation is visualized.
-            if visualization in self.cfg_task.env.observations:
+            if visualization in self.all_observations:
                 self._observations[visualization].visualize()
 
             # Call any other visualization functions (e.g. workspace extent, etc.).
@@ -184,8 +193,28 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
                     if pos.shape[3] == 4 and pos[env_index, actor_index, keypoint_index, 3] < 0.5: # Points have a mask-dimension and this is a padding point.
                         continue
                     pose = gymapi.Transform(gymapi.Vec3(*pos[env_index, actor_index, keypoint_index, 0:3]))
+                    color = [(1, 0, 0), (0, 1, 0), (0, 0, 1)][pos[env_index, actor_index, keypoint_index, 3].long() - 1]  # Color is determined by the point's class/ID.
                     sphere_geom = gymutil.WireframeSphereGeometry(size, 4, 4, color=color)
                     gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.env_ptrs[env_index], pose)
+
+    def visualize_voxelgrid(self, observation_name: str, voxel_size: float = 0.01, color: Tuple[float, float, float] = (1, 0, 0)) -> None:
+        sparse_voxelgrid = self._observations[observation_name].as_tensor()
+        #print("sparse_voxelgrid.shape:", sparse_voxelgrid.shape)
+        #input()
+        for env_index in range(self.num_envs):
+            mask = sparse_voxelgrid[:, 0] == env_index
+            voxels = sparse_voxelgrid[mask, 1:4]
+            points = voxels * voxel_size
+
+            for point in points:
+                pose = gymapi.Transform(gymapi.Vec3(*point))
+                #color = [(1, 0, 0), (0, 1, 0), (0, 0, 1)][pos[env_index, actor_index, keypoint_index, 3].long() - 1]  # Color is determined by the point's class/ID.
+                #sphere_geom = gymutil.WireframeSphereGeometry(size, 4, 4, color=color)
+                box_geom = gymutil.WireframeBoxGeometry(xdim=voxel_size, ydim=voxel_size, zdim=voxel_size, color=color)
+                gymutil.draw_lines(box_geom, self.gym, self.viewer, self.env_ptrs[env_index], pose)
+
+
+
     
     def visualize_poses(self, pos: torch.Tensor, quat: torch.Tensor, axis_length: float = 0.1) -> None:
         while len(pos.shape) < 4:

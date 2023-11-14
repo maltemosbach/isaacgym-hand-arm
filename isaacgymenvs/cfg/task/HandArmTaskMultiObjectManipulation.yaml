@@ -1,7 +1,7 @@
 name: HandArmMultiObjectManipulation
 
 physics_engine: ${..physics_engine}
-#full_experiment_name: ${..experiment}
+full_experiment_name: ${..experiment}
 #test: ${..test}
 
 
@@ -23,10 +23,13 @@ env:
     
     proprioceptive_observations: ['actuated_dof_pos', 'actuated_dof_vel', 'fingertip_pos', 'fingertip_quat']
     object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box' ]
-    task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos', 'frontview_sam_initial-pointcloud']
-    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
+    task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos']
+
+    observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'target_object_synthetic_initial-pointcloud'] #'target_object_synthetic-pointcloud', 'scene_synthetic-pointcloud'] #'topview-pointcloud', "topview_target_object-pointcloud"]
 
     #observations: ["actuated_dof_pos", "actuated_dof_vel", "fingertip_pos", "fingertip_quat", "object_pos", "object_bounding_box", "target_object_bounding_box", "fingertip_to_target_object_pos", "target_object_to_goal_pos"]
+
+    teacher_observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
 
 rl:
     # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
@@ -39,10 +42,15 @@ rl:
     
 
     reward:
+        # Task rewards.
         reaching: 1.0
         lifting: 5.0
         goal: 50.0
-        success: 100.0
+        success: 50.0
+
+        # Safety rewards.
+        dof_velocity_penalty: 1.0
+        collision_penalty: 0.1
 
         #object_velocity_penalty: 5.0
         #dof_velocity_penalty: 5.0

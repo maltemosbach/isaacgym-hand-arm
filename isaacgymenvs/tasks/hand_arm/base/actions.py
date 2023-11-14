@@ -1,7 +1,9 @@
 from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import *
+import numpy as np
 from omegaconf import DictConfig
 import os
+import trimesh
 import torch
 from typing import *
 from urdfpy import URDF
@@ -14,8 +16,8 @@ class ActorMixin:
     
     def acquire_action_tensors(self) -> None:
         self.current_dof_pos_targets = torch.zeros((self.num_envs, self.controller.dof_count), device=self.device)
-        self.current_actuated_dof_pos_targets = torch.zeros((self.num_envs, self.controller.actuator_count), device=self.device)
-        self.previous_actuated_dof_pos_targets = torch.zeros((self.num_envs, self.controller.actuator_count), device=self.device)
+        self.current_actuated_dof_pos_targets = torch.zeros((self.num_envs, self.controller.actuated_dof_count), device=self.device)
+        self.previous_actuated_dof_pos_targets = torch.zeros((self.num_envs, self.controller.actuated_dof_count), device=self.device)
         self.actuated_dof_pos = self.dof_pos[:, self.controller.actuated_dof_indices]
         self.actuated_dof_vel = self.dof_vel[:, self.controller.actuated_dof_indices]
 
@@ -60,7 +62,7 @@ class ActorMixin:
                 self.current_actuated_dof_pos_targets = tensor_clamp(
                     self.current_actuated_dof_pos_targets, self.controller.actuated_dof_lower_limits, self.controller.actuated_dof_upper_limits
                 )
-                self.current_dof_pos_targets[:, :] = self.controller.actuated_to_all(self.current_actuated_dof_pos_targets)
+                self.current_dof_pos_targets[:, :] = self.controller.actuated_dofs_to_all_dofs(self.current_actuated_dof_pos_targets)
 
             else:
                 assert False
@@ -88,9 +90,9 @@ class Robot:
         return self._urdf
     
     @urdf.setter
-    def urdf(self, loadpath: Union[str, bytes, os.PathLike]) -> None:
+    def urdf(self, urdf: URDF) -> None:
         # Load robot description as urdfpy.URDF object.
-        self._urdf = URDF.load(loadpath)
+        self._urdf = urdf
         
         # Acquire basic information about the robot.
         self.dof_names = [j.name for j in self.urdf.joints if j.joint_type != "fixed"]
@@ -98,6 +100,29 @@ class Robot:
         self.actuated_dof_names = [t.joints[0].name for t in self.urdf.transmissions]
         self.actuated_dof_count = len(self.actuated_dof_names)
         self.body_names = [l.name for l in self.urdf.links]
+
+        self.fingertip_body_names = [l.name for l in urdf.links if l.name.endswith("fingertip")]
+        self.fingertip_count = len(self.fingertip_body_names)
+
+        self.body_meshes = {name: link.collision_mesh for name, link in zip(self.body_names, urdf.links) if link.collision_mesh}
+        self.body_areas = {name: link.collision_mesh.area for name, link in zip(self.body_names, urdf.links) if link.collision_mesh}
+
+        use_reduced_robot = True
+        if use_reduced_robot:
+            self.body_areas.pop("shoulder_link")
+            self.body_areas.pop("upper_arm_link")
+            self.body_meshes.pop("shoulder_link")
+            self.body_meshes.pop("upper_arm_link")
+
+        density = 2000.0  # Number of samples per square meter.
+        self.num_body_surface_samples = [int(density * area) for area in self.body_areas.values()]
+
+    @property
+    def body_surface_samples(self) -> List[np.array]:
+        body_surface_samples = []
+        for body_index, body_mesh in enumerate(self.body_meshes.values()):
+            body_surface_samples.append(np.array(trimesh.sample.sample_surface(body_mesh, count=self.num_body_surface_samples[body_index])[0]).astype(float))
+        return body_surface_samples
 
     def attach_simulation(self, gym, sim, device: torch.device) -> None:
         self.gym = gym
@@ -116,6 +141,7 @@ class Robot:
         self.actuated_dof_indices = [self.gym.find_asset_dof_index(asset, name) for name in self.actuated_dof_names]
         self.rigid_body_count = self.gym.get_asset_rigid_body_count(asset)
         self.rigid_shape_count = self.gym.get_asset_rigid_shape_count(asset)
+        self.rigid_body_names = self.gym.get_asset_rigid_body_names(asset)
 
         self.dof_props = self.gym.get_asset_dof_properties(asset)
         self.dof_lower_limits = []
@@ -162,7 +188,7 @@ class Robot:
 
     def actuated_dofs_to_all_dofs(self, actuated_angles: torch.Tensor) -> torch.Tensor:
         batch_size, num_actuated_dofs = actuated_angles.shape
-        assert num_actuated_dofs == self.actuator_count
+        assert num_actuated_dofs == self.actuated_dof_count
         return torch.matmul(actuated_angles, self.mimic_multiplier.t()) + self.mimic_offset.expand(batch_size, -1)
     
     def map_actions_to_dof_pos_targets(actions: torch.Tensor) -> torch.Tensor:
@@ -205,4 +231,9 @@ class Robot:
         
         else:
             assert False
+
+    def create_actor(self, env_ptr, env_index, filter: int = 1, segmentation_id: int = 1):
+        actor_handle = self.gym.create_actor(env_ptr, self.asset, gymapi.Transform(), 'robot', env_index, filter, segmentation_id)
+        self.gym.set_actor_dof_properties(env_ptr, actor_handle, self.dof_props)
+        return actor_handle
 

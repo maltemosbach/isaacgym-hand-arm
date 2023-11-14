@@ -24,10 +24,10 @@ control:
 
 debug:
   camera:
-    save_recordings: True
+    save_recordings: False
     write_frames_every: 'step'  # Options {'dt', 'step'}.
 
-  visualize: ['bin_extent', 'frontview_sam_initial-pointcloud']
+  visualize: []
 
 logging:
   wandb:

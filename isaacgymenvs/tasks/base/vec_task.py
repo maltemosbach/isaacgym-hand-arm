@@ -102,9 +102,11 @@ class Env(ABC):
         self.num_agents = config["env"].get("numAgents", 1)  # used for multi-agent environments
 
         self.num_observations = config["env"].get("numObservations", 0)
+        self.num_teacher_observations = config["env"].get("numTeacherObservations", 0)
         self.num_states = config["env"].get("numStates", 0)
 
         self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.Inf, np.ones(self.num_obs) * np.Inf)
+        self.teacher_obs_space = spaces.Box(np.ones(self.num_teacher_obs) * -np.Inf, np.ones(self.num_teacher_obs) * np.Inf)
         self.state_space = spaces.Box(np.ones(self.num_states) * -np.Inf, np.ones(self.num_states) * np.Inf)
 
         self.num_actions = config["env"]["numActions"]
@@ -163,6 +165,11 @@ class Env(ABC):
     def observation_space(self) -> gym.Space:
         """Get the environment's observation space."""
         return self.obs_space
+    
+    @property
+    def teacher_observation_space(self) -> gym.Space:
+        """Get the environment's teacher observation space."""
+        return self.teacher_obs_space
 
     @property
     def action_space(self) -> gym.Space:
@@ -183,6 +190,11 @@ class Env(ABC):
     def num_obs(self) -> int:
         """Get the number of observations in the environment."""
         return self.num_observations
+    
+    @property
+    def num_teacher_obs(self) -> int:
+        """Get the number of teacher observations in the environment."""
+        return self.num_teacher_observations
 
     def set_train_info(self, env_frames, *args, **kwargs):
         """
@@ -266,6 +278,8 @@ class VecTask(Env):
         self.allocate_buffers()
 
         self.obs_dict = {}
+        if self.num_teacher_obs > 0:
+            self.obs_dict["teacher"] = {}
 
     def set_viewer(self):
         """Create the viewer."""
@@ -309,6 +323,8 @@ class VecTask(Env):
         # allocate buffers
         self.obs_buf = torch.zeros(
             (self.num_envs, self.num_obs), device=self.device, dtype=torch.float)
+        self.teacher_obs_buf = torch.zeros(
+            (self.num_envs, self.num_teacher_obs), device=self.device, dtype=torch.float)
         self.states_buf = torch.zeros(
             (self.num_envs, self.num_states), device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(
@@ -401,6 +417,9 @@ class VecTask(Env):
 
         self.obs_dict["obs"] = torch.clamp(self.obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
 
+        if self.num_teacher_obs > 0:
+            self.obs_dict["teacher"]["obs"] = torch.clamp(self.teacher_obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
+
         # asymmetric actor-critic
         if self.num_states > 0:
             self.obs_dict["states"] = self.get_state()
@@ -429,7 +448,10 @@ class VecTask(Env):
         Returns:
             Observation dictionary
         """
+        self.compute_observations()
         self.obs_dict["obs"] = torch.clamp(self.obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
+        if self.num_teacher_obs > 0:
+            self.obs_dict["teacher"]["obs"] = torch.clamp(self.teacher_obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
 
         # asymmetric actor-critic
         if self.num_states > 0:

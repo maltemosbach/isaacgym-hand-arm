@@ -34,9 +34,23 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             self._reset_objects(env_ids)
         else:
             self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.bringup)
-            self._disable_object_collisions(object_ids=range(self.cfg_env.objects.num_objects))
-            self._place_objects_before_bin()
-            self._drop_objects(env_ids)
+            
+            
+            from tqdm import tqdm
+            for dropping_sequence in range(self.cfg_env.objects.drop.num_initial_poses):
+                print("Dropping objects to find initial configuration:", dropping_sequence)
+                self._disable_object_collisions(object_ids=range(self.cfg_env.objects.num_objects))
+                self._init_object_poses()
+                self._drop_objects(env_ids)
+
+            # Finialize initial object poses.
+            for attribute in dir(self):
+                if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and not attribute.endswith("_initial") and not attribute == "object_configuration_indices":
+                    setattr(self, attribute + "_initial", torch.stack(getattr(self, attribute + "_initial_list"), dim=1))
+                    getattr(self, attribute + "_initial_list").clear()
+                    if attribute.endswith("pointcloud"):
+                        getattr(self, attribute + "_initial")[..., 3] *= 3  # Three is now the semantic value of initial pointclouds.
+
             self.objects_dropped = True
             self._reset_objects(env_ids)
 
@@ -47,13 +61,21 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         self.gym.simulate(self.sim)  # Simulate for one step and refresh base tensors to update the buffers (i.e. fingertip positions etc.)
 
         self.refresh_base_tensors()
-        self._reset_buffers(env_ids)
         self.reset_observation_tensors()
+        self._reset_buffers(env_ids)
 
     def _reset_objects(self, env_ids):
+        # Sample object configuration to reset to.
+        self.object_configuration_indices[env_ids] = torch.randint(self.cfg_env.objects.drop.num_initial_poses, (len(env_ids),), dtype=torch.int64, device=self.device)
+
+        object_pos_initial = self.object_pos_initial[env_ids, self.object_configuration_indices[env_ids]]
+        object_quat_initial = self.object_quat_initial[env_ids, self.object_configuration_indices[env_ids]]
+        #print("self.object_pos_initial.shape:", self.object_pos_initial.shape)
+        #print("object_pos_initial.shape:", object_pos_initial.shape)
+
         for i, object_index in enumerate(self.object_actor_env_indices):
-            self.root_pos[env_ids, object_index] = self.object_pos_initial[env_ids, i]
-            self.root_quat[env_ids, object_index] = self.object_quat_initial[env_ids, i]
+            self.root_pos[env_ids, object_index] = object_pos_initial[:, i]
+            self.root_quat[env_ids, object_index] = object_quat_initial[:, i]
             self.root_linvel[env_ids, object_index] = 0.0
             self.root_angvel[env_ids, object_index] = 0.0
             
@@ -105,17 +127,24 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             objects_in_bin[:] = self.objects_in_bin(self.object_pos)
 
         # Let the scene settle.
-        for _ in range(400):
+        for time_step in range(600):
             self.gym.simulate(self.sim)
+            self.refresh_base_tensors()
+            if torch.all(torch.max(torch.norm(self.object_linvel, dim=2), dim=1).values < 0.01):
+                break
+
             self.render()
         
         self.refresh_base_tensors()
 
         for attribute in dir(self):
-            if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor):
-                setattr(self, attribute + "_initial", getattr(self, attribute).detach().clone())
+            if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and not attribute.endswith("_initial") and not attribute == "object_configuration_indices":
+                print("attribute", attribute)
+                if not hasattr(self, attribute + "_initial_list"):
+                    setattr(self, attribute + "_initial_list", [])
+                getattr(self, attribute + "_initial_list").append(getattr(self, attribute).detach().clone())
 
-    def _place_objects_before_bin(self):
+    def _init_object_poses(self):
         # Place the objects in front of the bin
         self.root_pos[:, self.object_actor_env_indices, 0] = 1.1
         self.root_pos[:, self.object_actor_env_indices, 1] = 0.0
@@ -150,13 +179,13 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         object_quat = randomize_rotation(rand_floats[:, 0], rand_floats[:, 1], x_unit_tensor, y_unit_tensor)
         return object_quat
     
-    def _reset_target_object(self, env_ids, verbose: bool = True):
+    def _reset_target_object(self, env_ids, verbose: bool = False):
         if self.cfg_env.debug.highlight_target_object and not self.headless:
             for env_id in env_ids:
                 old_target_object_handle = self.object_handles[env_id][self.target_object_index[env_id]]
                 self.gym.reset_actor_materials(self.env_ptrs[env_id], old_target_object_handle, gymapi.MESH_VISUAL)
                 
-        self.target_object_index[:] = torch.randint(0, self.cfg_env.objects.num_objects, (len(env_ids),), dtype=torch.int64, device=self.device)
+        self.target_object_index[:] = torch.randint(self.cfg_env.objects.num_objects, (len(env_ids),), dtype=torch.int64, device=self.device)
         self.target_object_actor_env_index[:] = torch.Tensor(self.object_actor_env_indices).to(dtype=torch.int64, device=self.device)[self.target_object_index]
 
         if self.cfg_env.debug.highlight_target_object and not self.headless:
@@ -175,8 +204,8 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         self.root_pos[env_ids, self.goal_actor_env_index] = self.goal_pos[env_ids]
 
         if "reposition" in self.cfg_task.rl.goal:
-            if not self.headless:
-                reset_indices = torch.cat([reset_indices, self.goal_actor_indices[env_ids]])
+            reset_indices = torch.cat([reset_indices, self.goal_actor_indices[env_ids]])
+
             if self.cfg_task.rl.goal == "oriented_reposition":
                 self.goal_quat[env_ids] = self._get_random_quat(env_ids)
 
@@ -214,7 +243,9 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             elif reward_term == 'reaching':
                 target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
                 #fingertip_distance = torch.min(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1).values
-                fingertip_distance = torch.sum(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1)
+                fingertip_distance = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2)
+                fingertip_distance[:, 0] *= 4.0  # Thumb is always necessary for grasping with SIH.
+                fingertip_distance = torch.sum(fingertip_distance, dim=1)
 
                 reaching_reward_temp = 3.0
                 reward = scale * torch.exp(-reaching_reward_temp * fingertip_distance)
@@ -246,6 +277,19 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                 )
                 reward = torch.clip(reward, -10, 0)
 
+            elif reward_term == 'collision_penalty':
+                contact_force_magnitude = torch.max(torch.norm(self.contact_force, dim=2), dim=1).values
+                contact_force_threshold = 2.5
+                contact_force_penalty_temp = 1.0
+                reward = -scale * torch.where(
+                    contact_force_magnitude > contact_force_threshold, 
+                    torch.exp(contact_force_penalty_temp * (contact_force_magnitude - contact_force_threshold)) - 1.0, 
+                    torch.zeros_like(contact_force_magnitude)
+                )
+                reward = torch.clip(reward, -2.0, 0)
+
+
+
             elif reward_term == 'success':
                 reward = scale * goal_reached
 
@@ -257,10 +301,9 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
         self.log(reward_terms)
 
-    
 
     def _update_success_rate(self, goal_reached: torch.Tensor) -> None:
-        self.goal_reached_before[:] = torch.logical_or(goal_reached, self.goal_reached_before)                 
+        self.goal_reached_before[:] = torch.logical_or(goal_reached, self.goal_reached_before)
 
         # Log exponentially weighted moving average (EWMA) of the success rate
         if not hasattr(self, "success_rate_ewma"):
@@ -303,6 +346,7 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
         elif "reposition" in self.cfg_task.rl.goal:
             object_goal_distance = torch.norm(self.target_object_pos - self.goal_pos, dim=-1)
+
             if self.cfg_task.rl.goal == "oriented_reposition":
                 eef_body_quat_diff = quat_mul(self.eef_body_goal_quat, quat_conjugate(self.eef_body_quat))
                 eef_body_rot_dist = 2.0 * torch.asin(torch.clamp(torch.norm(eef_body_quat_diff[:, 0:3], p=2, dim=-1), max=1.0))
@@ -321,7 +365,8 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
     
     def _compute_object_lifting(self) -> Tuple[torch.Tensor, torch.BoolTensor]:
         # Compute achieved height increase of the object.
-        delta_target_object_pos = self.target_object_pos - self.object_pos_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)
+        object_pos_initial = self.object_pos_initial[torch.arange(self.num_envs), self.object_configuration_indices]
+        delta_target_object_pos = self.target_object_pos - object_pos_initial.gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)
         object_lifted = delta_target_object_pos[:, 2] > self.cfg_task.rl.lifting_threshold
 
         #just_lifted = torch.logical_and(height_increase > self.cfg_task.rl.lifting_threshold, ~self.object_lifted_before)
@@ -340,6 +385,8 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
         self.object_lifted_before[env_ids] = False
         self.goal_reached_before[env_ids] = False
-        target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
-        fingertip_dist = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=-1).sum(dim=-1)
-        self.fingertip_closest_distance[env_ids] = fingertip_dist.clone().detach()[env_ids]
+
+
+        #target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
+        #fingertip_dist = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=-1).sum(dim=-1)
+        #self.fingertip_closest_distance[env_ids] = fingertip_dist.clone().detach()[env_ids]
