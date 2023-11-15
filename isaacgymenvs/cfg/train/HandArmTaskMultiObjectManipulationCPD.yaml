@@ -7,7 +7,7 @@ params:
     name: dagger_continuous  # Select DAgger as the algorithm to be run.
 
   config:
-    learning_rate: 5e-4
+    learning_rate: 1e-3  #3e-4
     lr_schedule: None  # Learning rate scheduling is intended for RL algorithms. Use fixed learning rate for DAgger.
     minibatch_size: ${....task.env.numEnvs}  # Irrelevant as the regular actor loss is not used.
     horizon_length: 8  # Number of steps to run before updating the policy.
@@ -22,7 +22,7 @@ params:
 
       pointcloud:
         normalize: False
-        encoder: "minkowski_network"
+        encoder: "minkowski_fcnn"
         embed_size: 256
         processing_mode: "merge"  # Possible values: merge, shared_encoder, separate_encoders
 
@@ -73,8 +73,8 @@ params:
     train_valid_split: 0.95
 
     train:
-      capacity: 10000001
-      minibatch_size: 1024
+      capacity: 3000001
+      minibatch_size: 256
       sequence_len: 1
 
     validation:

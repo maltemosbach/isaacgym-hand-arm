@@ -42,7 +42,7 @@ cameras:
     resolution: [64, 64]
 
 pointclouds:
-  average_num_points: 128
+  average_num_points: 200
   max_num_points: 256
   sample_mode: 'area'
 

@@ -27,7 +27,7 @@ class WandbAlgoObserver(AlgoObserver):
         # this can fail occasionally, so we try a couple more times
         @retry(3, exceptions=(Exception,))
         def init_wandb():
-            wandb.init(
+            self._wandb_run = wandb.init(
                 project=cfg.wandb_project,
                 entity=cfg.wandb_entity,
                 group=cfg.wandb_group,
@@ -53,3 +53,27 @@ class WandbAlgoObserver(AlgoObserver):
             wandb.config.update(self.cfg, allow_val_change=True)
         else:
             wandb.config.update(omegaconf_to_dict(self.cfg), allow_val_change=True)
+
+    def after_init(self, algo):
+        self.algo = algo
+
+        # Log cfg_base, cfg_env, and cfg_task files to Weights & Biases run.
+        if hasattr(self.algo.vec_env.env, "cfg_base"):
+            self.wandb_add_config_files()
+
+    def wandb_add_config_files(self) -> None:
+        import wandb
+        from omegaconf import OmegaConf
+        import os
+        
+        if self._wandb_run is not None:
+            for additional_config in ["cfg_base", "cfg_env", "cfg_task"]:
+                if hasattr(self.algo.vec_env.env, additional_config):
+                    OmegaConf.save(
+                        getattr(self.algo.vec_env.env, additional_config),
+                        additional_config + ".yaml")
+                    artifact = wandb.Artifact(
+                        name=additional_config, type='config')
+                    artifact.add_file(local_path=additional_config + ".yaml")
+                    os.remove(additional_config + ".yaml")
+                    self._wandb_run.log_artifact(artifact)

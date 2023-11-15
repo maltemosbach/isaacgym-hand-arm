@@ -367,6 +367,19 @@ class HandArmEnvMultiObject(HandArmBase):
                 visualize=lambda: self.visualize_poses(self.target_object_pos, self.target_object_quat),
             )
         )
+        self.register_observation(
+            "target_object_pos_initial", 
+            LowDimObservation(
+                size=(3,),
+                as_tensor=lambda: self.target_object_pos_initial,
+                requires=["target_object_pos", "target_object_quat"],
+                callback=Callback(
+                    on_init=lambda: setattr(self, "target_object_pos_initial", self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
+                    on_reset=lambda: self.target_object_pos_initial.copy_(self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
+                ),
+                visualize=lambda: self.visualize_poses(self.target_object_pos_initial, self.target_object_quat),
+            )
+        )
 
         # Register geometric object observations such as bounding boxes and synthetic point-clouds.
         self.register_observation(
