@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation as R
 from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties
 import matplotlib.pyplot as plt
 from matplotlib.backend_bases import MouseButton
-from matplotlib.widgets import TextBox
+from matplotlib.widgets import TextBox, Button
 
 from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate
 
@@ -372,12 +372,12 @@ class HandArmEnvMultiObject(HandArmBase):
             LowDimObservation(
                 size=(3,),
                 as_tensor=lambda: self.target_object_pos_initial,
-                requires=["target_object_pos", "target_object_quat"],
+                requires=["target_object_pos"],
                 callback=Callback(
                     on_init=lambda: setattr(self, "target_object_pos_initial", self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
                     on_reset=lambda: self.target_object_pos_initial.copy_(self.root_pos.gather(1, self.target_object_actor_env_index.unsqueeze(1).unsqueeze(2).repeat(1, 1, 3)).squeeze(1)),
                 ),
-                visualize=lambda: self.visualize_poses(self.target_object_pos_initial, self.target_object_quat),
+                visualize=lambda: self.visualize_poses(self.target_object_pos_initial, torch.Tensor([[0, 0, 0, 1]]).repeat(self.num_envs, 1).to(self.device)),
             )
         )
 
@@ -410,8 +410,8 @@ class HandArmEnvMultiObject(HandArmBase):
             "object_synthetic-pointcloud",
             PointcloudObservation(
                 camera_name="object_synthetic",
-                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4,),
-                as_tensor=lambda: self.object_synthetic_pointcloud,
+                size=(self.cfg_env.objects.num_objects * self.cfg_env.pointclouds.max_num_points, 4,),
+                as_tensor=lambda: self.object_synthetic_pointcloud.flatten(1, 2),
                 callback=Callback(
                     on_init=self._acquire_object_synthetic_pointcloud,
                     on_step=self._refresh_object_synthetic_pointcloud,
@@ -553,11 +553,37 @@ class HandArmEnvMultiObject(HandArmBase):
                     size=(self.cfg_env.pointclouds.max_num_points, 4),
                     as_tensor=lambda: getattr(self, f"{camera_name}_sam_initial_pointcloud"),
                     callback=Callback(
-                        on_init=lambda: setattr(self, f"{camera_name}_sam_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                        on_init=lambda: self._init_sam_pointcloud(camera_name=camera_name),
                         on_reset=lambda: self._refresh_sam_pointcloud(camera_name=camera_name),
                     ),
                     requires=[f"{camera_name}-pointcloud", f"{camera_name}-rgb"],  # NOTE: The segmentation image is required to compute the points on the target object.
                     visualize=lambda: self.visualize_points(getattr(self, f"{camera_name}_sam_initial_pointcloud"))
+                )
+            )
+            self.register_observation(
+                f"{camera_name}_target_object_pos_initial", 
+                LowDimObservation(
+                    size=(3,),
+                    as_tensor=lambda: getattr(self, f"{camera_name}_target_object_pos_initial"),
+                    requires=[f"{camera_name}-pointcloud"],
+                    callback=Callback(
+                        on_init=lambda: setattr(self, f"{camera_name}_target_object_pos_initial", torch.zeros((self.num_envs, 3)).to(self.device)),
+                        on_reset=lambda: self._refresh_segmented_pointcloud_mean(camera_name=camera_name, tensor_name="_target_object_pos_initial", target_segmentation_id=self.target_object_index + 3),
+                    ),
+                    visualize=lambda: self.visualize_poses(getattr(self, f"{camera_name}_target_object_pos_initial"), torch.Tensor([[0, 0, 0, 1]]).repeat(self.num_envs, 1).to(self.device)),
+                )
+            )
+            self.register_observation(
+                f"{camera_name}_sam_pos_initial", 
+                LowDimObservation(
+                    size=(3,),
+                    as_tensor=lambda: getattr(self, f"{camera_name}_sam_pos_initial"),
+                    requires=[f"{camera_name}_sam_initial-pointcloud"],
+                    callback=Callback(
+                        on_init=lambda: setattr(self, f"{camera_name}_sam_pos_initial", torch.zeros((self.num_envs, 3)).to(self.device)),
+                        on_reset=lambda: self._refresh_sam_pointcloud_mean(camera_name=camera_name),
+                    ),
+                    visualize=lambda: self.visualize_poses(getattr(self, f"{camera_name}_sam_pos_initial"), torch.Tensor([[0, 0, 0, 1]]).repeat(self.num_envs, 1).to(self.device)),
                 )
             )
 
@@ -717,7 +743,7 @@ class HandArmEnvMultiObject(HandArmBase):
         if self.cfg_task.rl.goal == "reposition":
             goal_options = gymapi.AssetOptions()
             goal_options.fix_base_link = True
-            goal_asset = self.gym.create_sphere(self.sim, 0.025, goal_options)
+            goal_asset = self.gym.create_sphere(self.sim, 0.00, goal_options)
             goal_rigid_body_count = self.gym.get_asset_rigid_body_count(goal_asset)
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
         elif self.cfg_task.rl.goal == "throw":
@@ -997,7 +1023,8 @@ class HandArmEnvMultiObject(HandArmBase):
         pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].clone().detach().flatten(1, 2)
 
         # Segmentation gets a semantic value of 2 compared to the base value of 1.
-        pointcloud[:, :, 3] *= self._target_semantic_id
+        #pointcloud[:, :, 3] = torch.where(pointcloud[:, :, 3] > 0.5, pointcloud_id, 0)
+        #pointcloud[:, :, 3] *= self._target_semantic_id
   
         segmented_pointclouds = []
         for env_index in range(self.num_envs):
@@ -1015,17 +1042,33 @@ class HandArmEnvMultiObject(HandArmBase):
         getattr(self, camera_name + tensor_name)[:] = torch.stack(segmented_pointclouds)
         getattr(self, camera_name + tensor_name)[:, :, 3] *= pointcloud_id  # Used to set the pointcloud id of initial observations to a different one for example.
 
+    def _refresh_segmented_pointcloud_mean(self, camera_name:str, tensor_name: str, target_segmentation_id: torch.Tensor) -> None:
+        segmentation = self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION].flatten(1, 2)
+        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].clone().detach().flatten(1, 2)
+
+        points = pointcloud[:, :, 0:3]
+        mask = segmentation == target_segmentation_id.unsqueeze(1).repeat(1, segmentation.shape[1])
+
+        expanded_mask = mask.unsqueeze(-1).expand(-1, -1, 3)
+        sum_observed = torch.where(expanded_mask, points, torch.zeros_like(points)).sum(dim=1)
+        num_observed = mask.sum(dim=1, keepdim=True).clamp(min=1)
+        mean_observed = sum_observed / num_observed
+        getattr(self, camera_name + tensor_name)[:] = mean_observed
+
+    def _init_sam_pointcloud(self, camera_name: str) -> None:
+        setattr(self, f"{camera_name}_sam_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device))
+        from lang_sam import LangSAM
+        self.lang_sam = LangSAM("vit_b", "/home/user/mosbach/tools/sam_tracking/sam_tracking/ckpt/sam_vit_b_01ec64.pth")  # TODO: Check if there is a better model available. Speed is really not an issue here.
+
     def _refresh_sam_pointcloud(self, camera_name: str) -> None:
         rgb = self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB]
         pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
 
         from PIL import Image
-        from lang_sam import LangSAM
-
-        self.lang_sam = LangSAM("vit_b", "/home/user/mosbach/tools/sam_tracking/sam_tracking/ckpt/sam_vit_b_01ec64.pth")  # TODO: Check if there is a better model available. Speed is really not an issue here.
 
         segmented_pointclouds = []
         for env_index in range(self.num_envs):
+            self.sam_selection_submitted = False
             color_image_numpy = rgb[env_index].cpu().numpy()
             self.input_points = []
             self.input_labels = []
@@ -1071,6 +1114,17 @@ class HandArmEnvMultiObject(HandArmBase):
                         text_box.set_val('')
                 sam_figure.canvas.draw()
 
+            def clear_button_clicked(event):
+                self.input_points = []
+                self.input_labels = []
+                self.mask = np.zeros_like(color_image_numpy)
+                ax_image.imshow(color_image_numpy)
+                sam_figure.canvas.draw()
+
+            def submit_button_clicked(event):
+                self.sam_selection_submitted = True
+
+
             sam_figure = plt.figure(num=f"Select target object for camera '{camera_name}' on env {env_index}.")
             ax_image = sam_figure.add_subplot(111)
             ax_image.axis('off')
@@ -1079,13 +1133,26 @@ class HandArmEnvMultiObject(HandArmBase):
             text_box = TextBox(ax_prompt, "Text prompt:", initial="")
             text_box.on_submit(update_mask_on_text)
 
+            ax_clear = sam_figure.add_axes([0.7, 0.05, 0.1, 0.075])
+            ax_submit = sam_figure.add_axes([0.81, 0.05, 0.1, 0.075])
+            clear_button = Button(ax_clear, 'Clear')
+            submit_button = Button(ax_submit, 'Submit')
+            clear_button.on_clicked(clear_button_clicked)
+            submit_button.on_clicked(submit_button_clicked)
+
             ax_image.imshow(color_image_numpy)
             sam_figure.canvas.mpl_connect('button_press_event', update_mask_on_click)
             sam_figure.canvas.mpl_connect('motion_notify_event', on_hover_over_image)
-            plt.show()
+
+            plt.show(block=False)
+            
+            while not self.sam_selection_submitted:
+                plt.pause(0.01)
 
             target_object_mask = torch.from_numpy(self.mask).to(self.device).flatten(0, 1)
             segmented_pointcloud = pointcloud[env_index][target_object_mask]
+
+            print("target_object_mask:", target_object_mask)
 
             # More points are on the object than can fit into the padded point-cloud tensor. Subsample points.
             if len(segmented_pointcloud) > self.cfg_env.pointclouds.max_num_points:
@@ -1093,9 +1160,18 @@ class HandArmEnvMultiObject(HandArmBase):
             
             # Fewer points than the padded point-cloud tensor. Pad with zeros.
             else:
-                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(target_object_pointcloud), 4)).to(self.device)))
+                segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(segmented_pointcloud), 4)).to(self.device)))
             segmented_pointclouds.append(segmented_pointcloud)
         getattr(self, camera_name + "_sam_initial_pointcloud")[:] = torch.stack(segmented_pointclouds)
+
+    def _refresh_sam_pointcloud_mean(self, camera_name: str) -> None:
+        points = getattr(self, camera_name + "_sam_initial_pointcloud")[:, :, 0:3]
+        mask = getattr(self, camera_name + "_sam_initial_pointcloud")[:, :, 3] > 0.5
+        expanded_mask = mask.unsqueeze(-1).expand(-1, -1, 3)
+        sum_observed = torch.where(expanded_mask, points, torch.zeros_like(points)).sum(dim=1)
+        num_observed = mask.sum(dim=1, keepdim=True).clamp(min=1)
+        mean_observed = sum_observed / num_observed
+        getattr(self, camera_name + "_sam_pos_initial")[:] = mean_observed
 
     def _acquire_object_mass(self) -> None:
         self.object_mass = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)
