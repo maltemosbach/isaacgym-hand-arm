@@ -1060,7 +1060,7 @@ class HandArmEnvMultiObject(HandArmBase):
         from lang_sam import LangSAM
         self.lang_sam = LangSAM("vit_b", "/home/user/mosbach/tools/sam_tracking/sam_tracking/ckpt/sam_vit_b_01ec64.pth")  # TODO: Check if there is a better model available. Speed is really not an issue here.
 
-    def _refresh_sam_pointcloud(self, camera_name: str) -> None:
+    def _refresh_sam_pointcloud(self, camera_name: str, pointcloud_id: int = 2) -> None:
         rgb = self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB]
         pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
 
@@ -1124,25 +1124,37 @@ class HandArmEnvMultiObject(HandArmBase):
             def submit_button_clicked(event):
                 self.sam_selection_submitted = True
 
+            def on_resize(event):
+                bbox = ax_image.get_position()
+                ax_width = bbox.x1 - bbox.x0
+                ax_x = bbox.x0
+
+                ax_prompt.set_position([ax_x, 0.2, ax_width, 0.05])
+                ax_clear.set_position([ax_x, 0.1, ax_width / 2, 0.075])
+                ax_submit.set_position([ax_x + ax_width / 2, 0.1, ax_width / 2, 0.075])
+
 
             sam_figure = plt.figure(num=f"Select target object for camera '{camera_name}' on env {env_index}.")
             ax_image = sam_figure.add_subplot(111)
             ax_image.axis('off')
             sam_figure.subplots_adjust(bottom=0.2)
-            ax_prompt = plt.axes([0.1, 0.05, 0.8, 0.075])
-            text_box = TextBox(ax_prompt, "Text prompt:", initial="")
+            ax_prompt = sam_figure.add_axes([0.1, 0.2, 0.8, 0.05])
+            text_box = TextBox(ax_prompt, "", initial="")
             text_box.on_submit(update_mask_on_text)
 
-            ax_clear = sam_figure.add_axes([0.7, 0.05, 0.1, 0.075])
-            ax_submit = sam_figure.add_axes([0.81, 0.05, 0.1, 0.075])
+            ax_clear = sam_figure.add_axes([0.1, 0.1, 0.4, 0.075])
+            ax_submit = sam_figure.add_axes([0.5, 0.1, 0.4, 0.075])
             clear_button = Button(ax_clear, 'Clear')
             submit_button = Button(ax_submit, 'Submit')
             clear_button.on_clicked(clear_button_clicked)
             submit_button.on_clicked(submit_button_clicked)
 
             ax_image.imshow(color_image_numpy)
+            ax_image.set_position([0.1, 0.3, 0.8, 0.6])
             sam_figure.canvas.mpl_connect('button_press_event', update_mask_on_click)
             sam_figure.canvas.mpl_connect('motion_notify_event', on_hover_over_image)
+
+            sam_figure.canvas.mpl_connect('resize_event', on_resize)
 
             plt.show(block=False)
             
@@ -1163,6 +1175,7 @@ class HandArmEnvMultiObject(HandArmBase):
                 segmented_pointcloud = torch.cat((segmented_pointcloud, torch.zeros((self.cfg_env.pointclouds.max_num_points - len(segmented_pointcloud), 4)).to(self.device)))
             segmented_pointclouds.append(segmented_pointcloud)
         getattr(self, camera_name + "_sam_initial_pointcloud")[:] = torch.stack(segmented_pointclouds)
+        getattr(self, camera_name + "_sam_initial_pointcloud")[:, :, 3] *= pointcloud_id  # Used to set the pointcloud id of initial observations to a different one for example.
 
     def _refresh_sam_pointcloud_mean(self, camera_name: str) -> None:
         points = getattr(self, camera_name + "_sam_initial_pointcloud")[:, :, 0:3]
