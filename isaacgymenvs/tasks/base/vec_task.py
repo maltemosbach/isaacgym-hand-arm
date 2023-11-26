@@ -170,6 +170,20 @@ class Env(ABC):
     def teacher_observation_space(self) -> gym.Space:
         """Get the environment's teacher observation space."""
         return self.teacher_obs_space
+    
+    @property
+    def observation_start_end(self) -> Dict[str, Tuple[int, int]]:
+        if hasattr(self, "_observation_start_end"):
+            return self._observation_start_end
+        else:
+            return None
+        
+    @property
+    def teacher_observation_start_end(self) -> Dict[str, Tuple[int, int]]:
+        if hasattr(self, "_teacher_observation_start_end"):
+            return self._teacher_observation_start_end
+        else:
+            return None
 
     @property
     def action_space(self) -> gym.Space:

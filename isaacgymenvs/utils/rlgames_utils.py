@@ -269,7 +269,9 @@ class RLGPUEnv(vecenv.IVecEnv):
         info = {}
         info['action_space'] = self.env.action_space
         info['observation_space'] = self.env.observation_space
+        info['observation_start_end'] = self.env.observation_start_end
         info['teacher_observation_space'] = self.env.teacher_observation_space
+        info['teacher_observation_start_end'] = self.env.teacher_observation_start_end
 
         info['observation_keys'] = self.env.observation_keys
 

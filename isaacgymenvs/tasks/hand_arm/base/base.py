@@ -7,7 +7,6 @@ from isaacgymenvs.tasks.hand_arm.base.camera_sensor import CameraMixin
 from isaacgymenvs.tasks.hand_arm.base.logger import LoggerMixin
 from isaacgymenvs.tasks.hand_arm.base.observations import ObserverMixin
 from isaacgymenvs.tasks.hand_arm.base.simulation import SimulationMixin
-from isaacgymenvs.tasks.hand_arm.utils import URDFRobot
 from isaacgym.torch_utils import *
 import matplotlib
 from typing import *
@@ -34,13 +33,12 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
             self.all_observations = list(set(self.all_observations + cfg["env"]["teacher_observations"]))
 
         self.register_observations()
-        self.finalize_observations()
 
         self.cfg["env"]["numActions"] = self._compute_num_actions()
-        self.cfg["env"]["numObservations"], self.observations_start_end = self._compute_num_observations(cfg["env"]["observations"])
+        self.cfg["env"]["numObservations"], self._observation_start_end = self._compute_num_observations(cfg["env"]["observations"])
 
         if "teacher_observations" in cfg["env"].keys():
-            self.cfg["env"]["numTeacherObservations"], self.teacher_observations_start_end = self._compute_num_observations(cfg["env"]["teacher_observations"])
+            self.cfg["env"]["numTeacherObservations"], self._teacher_observation_start_end = self._compute_num_observations(cfg["env"]["teacher_observations"])
         
         
         self.headless = headless
@@ -111,6 +109,9 @@ class HandArmBase(VecTask, ActorMixin, ObserverMixin, SimulationMixin, LoggerMix
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         #reset_goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
         #self.reset_target_pose(reset_goal_env_ids)
+
+        if len(actions.shape) == 1:
+            actions = actions.unsqueeze(0)
 
         self.apply_controls(actions)
 

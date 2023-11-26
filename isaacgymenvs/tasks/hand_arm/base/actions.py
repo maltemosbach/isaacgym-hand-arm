@@ -107,16 +107,30 @@ class Robot:
         self.body_meshes = {name: link.collision_mesh for name, link in zip(self.body_names, urdf.links) if link.collision_mesh}
         self.body_areas = {name: link.collision_mesh.area for name, link in zip(self.body_names, urdf.links) if link.collision_mesh}
 
+        print("self.body_areas:", self.body_areas)
+
         use_reduced_robot = True
         if use_reduced_robot:
             self.body_areas.pop("shoulder_link")
             self.body_areas.pop("upper_arm_link")
+            self.body_areas.pop("forearm_link")
+            self.body_areas.pop("wrist_1_link")
+            self.body_areas.pop("wrist_2_link")
+            self.body_areas.pop("wrist_3_link")
+            #self.body_areas.pop("palm")
             self.body_meshes.pop("shoulder_link")
             self.body_meshes.pop("upper_arm_link")
+            self.body_meshes.pop("forearm_link")
+            self.body_meshes.pop("wrist_1_link")
+            self.body_meshes.pop("wrist_2_link")
+            self.body_meshes.pop("wrist_3_link")
+            #self.body_meshes.pop("palm")
 
-        density = 2000.0  # Number of samples per square meter.
+        density = 5000.0  # Number of samples per square meter.
         self.num_body_surface_samples = [int(density * area) for area in self.body_areas.values()]
-
+        #print("self.num_body_surface_samples:", sum(self.num_body_surface_samples))
+        #input()
+        
     @property
     def body_surface_samples(self) -> List[np.array]:
         body_surface_samples = []
@@ -232,8 +246,9 @@ class Robot:
         else:
             assert False
 
-    def create_actor(self, env_ptr, env_index, filter: int = 1, segmentation_id: int = 1):
-        actor_handle = self.gym.create_actor(env_ptr, self.asset, gymapi.Transform(), 'robot', env_index, filter, segmentation_id)
+    def create_actor(self, env_ptr, env_index, disable_self_collisions: bool, segmentation_id: int = 1):
+        collision_filter = 0b1 if disable_self_collisions else 0b0
+        actor_handle = self.gym.create_actor(env_ptr, self.asset, gymapi.Transform(), 'robot', env_index, collision_filter, segmentation_id)
         self.gym.set_actor_dof_properties(env_ptr, actor_handle, self.dof_props)
         return actor_handle
 

@@ -14,6 +14,40 @@ import warnings
 from typing import Any
 
 
+
+
+def subsample_pointcloud(pointcloud: torch.Tensor, num_samples: int) -> torch.Tensor:
+    batch_size, num_points_padded, _ = pointcloud.shape
+
+    valid_mask = pointcloud[:, :, 3] > 0.5
+
+    valid_points = pointcloud[valid_mask][:, :3]
+    valid_points = valid_points[torch.randperm(valid_points.shape[0])]
+
+    valid_counts = valid_mask.sum(dim=1)
+
+
+    cumsum_valid_counts = torch.cumsum(valid_counts, dim=0)
+    indices = torch.arange(num_samples, device=pointcloud.device).unsqueeze(0).expand(batch_size, num_samples)
+
+    indices = indices + cumsum_valid_counts.unsqueeze(1) - valid_counts.unsqueeze(1)
+    indices = indices.clamp(min=0, max=len(valid_points) - 1)
+
+    gathered_points = valid_points[indices]
+
+    valid_points_mask = torch.ones_like(gathered_points[:, :, 0])
+
+    padding_mask = torch.arange(num_samples, device=pointcloud.device).expand_as(indices) >= valid_counts.unsqueeze(1)
+    valid_points_mask[padding_mask] = 0.
+
+    gathered_points[padding_mask] = 0.
+
+    gathered_points = torch.cat([gathered_points, valid_points_mask.unsqueeze(-1)], dim=-1)
+
+    return gathered_points
+
+
+
 # Extends IsaacGym's ImageType enum and specifies base type required for computation of the outpus.
 class ImageType(Enum):
     RGB = ("RGB", (3,), torch.uint8, [gymapi.ImageType.IMAGE_COLOR])
@@ -282,7 +316,7 @@ class IsaacGymCameraSensor(CameraSensor):
 
     def _compute_pointcloud(self, max_depth: float = 10) -> torch.Tensor:
         x_range = [-0.07, 0.63]
-        y_range = [0.23, 0.83]
+        y_range = [0.33, 0.83]
         is_valid = (self.current_sensor_observation[ImageType.DEPTH] > -max_depth).to(self.device).unsqueeze(-1)
         depth_image = torch.clamp(self.current_sensor_observation[ImageType.DEPTH], min=-max_depth)  # Clamp to avoid NaNs.
         global_points = depth_image_to_global_points(depth_image, self.projection_matrix, self.view_matrix, self.device)

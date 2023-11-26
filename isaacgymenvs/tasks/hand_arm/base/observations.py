@@ -6,7 +6,15 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import torch
 from typing import Callable, Dict, List, Tuple, Sequence
-from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties
+from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties, subsample_pointcloud
+
+#import rospy
+#from sensor_msgs.msg import JointState
+#import tf
+#import tabulate
+
+from isaacgym import gymapi
+from isaacgym.torch_utils import *
 
 
 PASS = lambda: None
@@ -114,51 +122,6 @@ class PointcloudObservation(CameraObservation):
 
         if not self.key:
             self.key = f"{self.camera_name}_pointcloud"
-
-
-def pack_padded_pointclouds(padded_pointclouds: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    batch_size, max_num_points_padded, _ = padded_pointclouds.size()
-    mask_indices = torch.arange(batch_size, device=padded_pointclouds.device)[:, None].expand(-1, max_num_points_padded)[mask]
-    packed_pointclouds = torch.cat([mask_indices[:, None], padded_pointclouds[mask]], dim=1)
-    return packed_pointclouds
-
-
-def sparse_quantize(padded_pointclouds: torch.Tensor, voxel_size: float = 0.01, aslist: bool = True) -> torch.Tensor:
-    packed_pointclouds= pack_padded_pointclouds(padded_pointclouds, mask=(padded_pointclouds[..., 3] > 0))
-    packed_pointclouds[:, 1:4] = (packed_pointclouds[:, 1:4] / voxel_size).int()  # Still contains voxels for all points even if they fall into the same voxel.
-    coordinates = packed_pointclouds[:, :4].int()
-    features = packed_pointclouds[:, 4:].float()
-
-    unique_voxel_indices, inverse_indices = torch.unique(coordinates, return_inverse=True, dim=0)
-
-    accumulated_features = torch.zeros((unique_voxel_indices.size(0), features.size(1)), dtype=torch.float32, device=features.device)
-    accumulated_features.index_add_(0, inverse_indices, features)
-    counts = torch.bincount(inverse_indices, minlength=unique_voxel_indices.size(0)).float().unsqueeze(1)
-    average_features = accumulated_features / counts
-
-    packed_voxelgrid = torch.cat([unique_voxel_indices.float(), average_features], dim=1)
-
-    if aslist:
-        sorted_indices, sorted_order = torch.sort(packed_voxelgrid[:, 0], dim=0)
-        sorted_points = packed_voxelgrid[sorted_order, 1:]
-        unique_indices, counts = torch.unique(sorted_indices, return_counts=True, dim=0)
-        voxelgrids_list = list(torch.split(sorted_points, counts.tolist(), dim=0))
-        return voxelgrids_list
-    else:
-        return packed_voxelgrid
-
-
-
-@dataclass
-class VoxelgridObservation(CameraObservation):
-    def __post_init__(self, as_tensor: Callable[[], torch.Tensor]) -> None:
-        super().__post_init__(as_tensor)
-        if not self.key:
-            self.key = f"{self.camera_name}_voxelgrid"
-
-    def as_tensor(self) -> torch.Tensor:
-        tensor_data = self._as_tensor()
-        return tensor_data
 
 
 class ObserverMixin:
@@ -286,6 +249,110 @@ class ObserverMixin:
             )
         )
 
+        '''
+        self.register_observation(
+            "ur5_joint_state",
+            LowDimObservation(
+                size=(2 * self.arm_dof_count,),  # Position and velocity.
+                get_state=lambda: self.ur5_joint_state,
+                refresh=RefreshCallback(
+                    on_init=self._init_ur5_joint_state,
+                    on_step=self._refresh_ur5_joint_state,
+                )
+            )
+        )
+
+        self.register_observation(
+            LowDimObservable(
+                name="ur5_flange_pose",
+                size=7,
+                get_state=lambda: self.ur5_flange_pose,
+                refresh=RefreshCallback(
+                    on_init=self._init_ur5_flange_pose,
+                    on_step=self._refresh_ur5_flange_pose,
+                )
+            )
+        )
+
+    def _init_ur5_joint_state(self) -> None:
+        self.ur5_joint_state = torch.zeros((self.num_envs, 2 * self.arm_dof_count), device=self.device)
+
+        if self.cfg_base.ros.activate:
+            self._ur5_joint_state_msg = None
+            self._ur5_joint_state_sub = rospy.Subscriber("/joint_states", JointState, self._ur5_joint_state_callback)
+
+    def _ros_callback_ur5_joint_state(self, msg: JointState) -> None:
+        # Check if received joint state is for th UR5.
+        if set(msg.name) == set(("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint")):
+            # Store latest message
+            self._ur5_joint_state_msg = msg
+
+    def _refresh_ur5_joint_state(self, ros_compare: bool = True) -> None:
+        if self.cfg_base.ros.activate:
+            if self._ur5_joint_state_msg is None:
+                raise ValueError("No joint state message received yet for UR5.")
+            
+            joint_state = torch.tensor(self._ur5_joint_state_msg.position + self._ur5_joint_state_msg.velocity, dtype=torch.float32, device=self.device)
+            self.ur5_joint_state[:] = joint_state.unsqueeze(0).repeat(self.num_envs, 1)
+
+            if ros_compare:
+                # Check age of last received message.
+                last_message_delay = (rospy.Time.now() - self._ur5_joint_state_msg.header.stamp).to_sec()
+
+                # Compare joint state from ROS with simulation.
+                pos_difference = torch.abs(self.ur5_joint_state[:, 0:self.arm_dof_count] - self.dof_pos[:, 0:6])
+                vel_difference = torch.abs(self.ur5_joint_state[:, self.arm_dof_count:] - self.dof_vel[:, 0:6])
+
+                table = [["Position", self.ur5_joint_state[:, 0:self.arm_dof_count], self.dof_pos[:, 0:6], pos_difference],
+                 ["Velocity", self.ur5_joint_state[:, self.arm_dof_count:], self.dof_vel[:, 0:6], vel_difference],]
+
+                print(tabulate(table, headers=["UR5",f"Real (delay={last_message_delay} [s])", "Sim", "Difference"]))
+
+                if torch.any(pos_difference > 0.01):
+                    raise ValueError("UR5 joint position from ROS and simulation do not match.")
+                
+                if last_message_delay > 0.1:
+                    raise ValueError("Last UR5 joint state message is older than 0.1s.")
+        
+        else:
+            self.ur5_joint_state[:, 0:self.arm_dof_count] = self.dof_pos[:, 0:6]
+            self.ur5_joint_state[:, self.arm_dof_count:] = self.dof_vel[:, 0:6]
+
+    def _init_ur5_flange_pose(self) -> None:
+        self.ur5_flange_pose = torch.zeros((self.num_envs, 7), device=self.device)
+        self.ur5_flange_body_env_index = self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.controller_handles[0], "flange", gymapi.DOMAIN_ENV)
+
+        if self.cfg_base.ros.activate and not hasattr(self, "tf_sub"):
+            self.tf_sub = tf.TransformListener()
+    
+    def _refresh_ur5_flange_pose(self, ros_compare: bool = True) -> None:
+        if self.cfg_base.ros.activate:
+            pos, quat = self.tf_sub.lookupTransform('base_link', 'flange', rospy.Time(0))
+            self.ur5_flange_pose[:, 0:3] = torch.tensor(pos, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+            self.ur5_flange_pose[:, 3:7] = torch.tensor(quat, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+
+            if ros_compare:
+                pos_difference = torch.abs(self.ur5_flange_pose[:, 0:3] - self.body_pos[:, self.ur5_flange_body_env_index, 0:3])
+                quat_difference = quat_mul(self.ur5_flange_pose[:, 3:7], quat_conjugate(self.body_quat[:, self.ur5_flange_body_env_index, 0:4]))
+                angle_difference = 2.0 * torch.asin(torch.clamp(torch.norm(quat_difference[:, 0:3], p=2, dim=-1), max=1.0))
+
+                table = [["Position", self.ur5_flange_pose[:, 0:3], self.body_pos[:, self.ur5_flange_body_env_index, 0:3], pos_difference, torch.norm(pos_difference, p=2, dim=-1)],
+                         ["Quaternion", self.ur5_flange_pose[:, 3:7], self.body_quat[:, self.ur5_flange_body_env_index, 0:4], quat_difference, angle_difference],]
+                print(tabulate(table, headers=["UR5-flange", "Real", "Sim", "Difference", "Difference Mag."]))
+
+                if torch.any(pos_difference > 0.01):
+                    raise ValueError("UR5 flange position from ROS and simulation do not match.")
+                
+                if torch.any(angle_difference > 0.01):
+                    raise ValueError("UR5 flange orientation from ROS and simulation do not match.")
+        
+        else:
+            self.ur5_flange_pose[:, 0:3] = self.body_pos[:, self.ur5_flange_body_env_index, 0:3]
+            self.ur5_flange_pose[:, 3:7] = self.body_quat[:, self.ur5_flange_body_env_index, 0:4]
+    
+    '''
+    
+    
     def register_camera_observations(self) -> None:
         for camera_name in self.cfg_env.cameras:
             camera_properties = CameraSensorProperties(**self.cfg_env.cameras[camera_name], image_types=["rgb"])
@@ -323,7 +390,7 @@ class ObserverMixin:
                     )
                 elif image_type == "pointcloud":
                     self.register_observation(
-                        observation_name, 
+                        observation_name,
                         PointcloudObservation(
                             camera_name=camera_name,
                             size=(camera_properties.height * camera_properties.width, 4),
@@ -332,25 +399,16 @@ class ObserverMixin:
                         )
                     )
 
-    def finalize_observations(self) -> None:
-        registered_observations_keys = list(self._observations.keys())
-        for observation_name in registered_observations_keys:
-            if observation_name.endswith("-pointcloud"):
-                camera_name, _ = observation_name.split("-")
-                self.register_observation(
-                    camera_name + "-voxelgrid",
-                    VoxelgridObservation(
-                        camera_name=camera_name,
-                        size=(0,),
-                        requires=[observation_name],
-                        as_tensor=functools.partial(self.pointcloud_to_voxelgrid, observation_name=observation_name),
-                        visualize=functools.partial(self.visualize_voxelgrid, observation_name=camera_name + "-voxelgrid")
-                    )
+            subsampling_ratio = 0.5
+            self.register_observation(
+                f"{camera_name}_subsampled-pointcloud",
+                PointcloudObservation(
+                    camera_name=camera_name + "_subsampled",
+                    size=(int(camera_properties.height * camera_properties.width * subsampling_ratio), 4),
+                    as_tensor=lambda: subsample_pointcloud(self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2), num_samples=int(camera_properties.height * camera_properties.width * subsampling_ratio)),
+                    visualize=lambda: self.visualize_points(subsample_pointcloud(self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2), num_samples=int(camera_properties.height * camera_properties.width * subsampling_ratio)))
                 )
-
-
-    def pointcloud_to_voxelgrid(self, observation_name: str) -> torch.Tensor:
-        return sparse_quantize(self._observations[observation_name].as_tensor())
+            )
     
     @property
     def observation_dependency_graph(self) -> nx.DiGraph:

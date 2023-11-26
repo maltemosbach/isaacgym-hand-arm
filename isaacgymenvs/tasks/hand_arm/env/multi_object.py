@@ -16,10 +16,11 @@ import torch
 from scipy.spatial.transform import Rotation as R
 from isaacgymenvs.tasks.hand_arm.base.camera_sensor import ImageType, CameraSensorProperties
 import matplotlib.pyplot as plt
-from matplotlib.backend_bases import MouseButton
-from matplotlib.widgets import TextBox, Button
 
 from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate
+
+
+
 
 
 def generate_cuboid_bin_urdf(height, depth_width, file_path):
@@ -146,13 +147,6 @@ def generate_cuboid_bin_urdf(height, depth_width, file_path):
         f.write(urdf_string)
 
 
-
-
-def show_mask(mask, ax, random_color=False):
-    color = np.array([30/255, 144/255, 255/255, 0.6])
-    h, w = mask.shape[-2:]
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
 
 
 class ObjectAsset:
@@ -315,6 +309,7 @@ class HandArmEnvMultiObject(HandArmBase):
             LowDimObservation(
                 size=(self.cfg_env.objects.num_objects,),
                 as_tensor=lambda: self.object_mass,
+                is_mandatory=True,  # NOTE: Required to compute randomizations.
                 callback=Callback(
                     on_init=self._acquire_object_mass,
                 )
@@ -661,6 +656,7 @@ class HandArmEnvMultiObject(HandArmBase):
         
         if cfg_env.bin.asset == 'no_bin':
             self.bin_info = {"extent": [[-0.25, -0.25, 0.0], [0.25, 0.25, 0.2]]}
+            #self.bin_info = {"extent": [[-0.1, -0.1, 0.0], [0.1, 0.1, 0.2]]}
         else:
             bin_info_path = f'../../assets/hand_arm/{cfg_env.bin.asset}/bin_info.yaml'
             self.bin_info = hydra.compose(config_name=bin_info_path)
@@ -746,6 +742,7 @@ class HandArmEnvMultiObject(HandArmBase):
             goal_asset = self.gym.create_sphere(self.sim, 0.00, goal_options)
             goal_rigid_body_count = self.gym.get_asset_rigid_body_count(goal_asset)
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
+
         elif self.cfg_task.rl.goal == "throw":
             goal_options = gymapi.AssetOptions()
             goal_options.fix_base_link = True
@@ -758,6 +755,21 @@ class HandArmEnvMultiObject(HandArmBase):
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
         else:
             assert False
+
+
+        if self.cfg_env.collision_boundaries.add_safety_walls:
+            safety_walls_options = gymapi.AssetOptions()
+            safety_walls_options.fix_base_link = True
+            safety_walls_asset = self.gym.load_asset(self.sim, self._asset_root, 'collision_boundaries/safety_walls_visible.urdf', safety_walls_options)
+            safety_walls_rigid_body_count = self.gym.get_asset_rigid_body_count(safety_walls_asset)
+            safety_walls_rigid_shape_count = self.gym.get_asset_rigid_shape_count(safety_walls_asset)
+
+        if self.cfg_env.collision_boundaries.add_table_offset:
+            table_offset_options = gymapi.AssetOptions()
+            table_offset_options.fix_base_link = True
+            table_offset_asset = self.gym.load_asset(self.sim, self._asset_root, 'collision_boundaries/table_offset_visible.urdf', table_offset_options)
+            table_offset_rigid_body_count = self.gym.get_asset_rigid_body_count(table_offset_asset)
+            table_offset_rigid_shape_count = self.gym.get_asset_rigid_shape_count(table_offset_asset)
 
         actor_count = 0
         for env_index in range(self.num_envs):
@@ -798,10 +810,20 @@ class HandArmEnvMultiObject(HandArmBase):
                 max_rigid_bodies += bin_rigid_body_count
                 max_rigid_shapes += bin_rigid_shape_count
 
+
+            if self.cfg_env.collision_boundaries.add_safety_walls:
+                max_rigid_bodies += safety_walls_rigid_body_count
+                max_rigid_shapes += safety_walls_rigid_shape_count
+            
+            if self.cfg_env.collision_boundaries.add_table_offset:
+                max_rigid_bodies += table_offset_rigid_body_count
+                max_rigid_shapes += table_offset_rigid_shape_count
+
+
             self.gym.begin_aggregate(env_ptr, max_rigid_bodies, max_rigid_shapes, True)
 
             # Create robot actor.
-            robot_handle = self.controller.create_actor(env_ptr, env_index)
+            robot_handle = self.controller.create_actor(env_ptr, env_index, disable_self_collisions=True)
             self.controller_handles.append(robot_handle)
             self.controller_actor_indices.append(actor_count)
             actor_count += 1
@@ -823,6 +845,22 @@ class HandArmEnvMultiObject(HandArmBase):
                 self.object_actor_indices[env_index].append(actor_count)
                 actor_count += 1
 
+            # Create collision boundaries actor.
+            if self.cfg_env.collision_boundaries.add_safety_walls:
+                safety_walls_handle = self.gym.create_actor(env_ptr, safety_walls_asset, gymapi.Transform(p=gymapi.Vec3(0.28, 0.33, 0.)), 'safety_walls', env_index, 0, 0)
+                actor_count += 1
+
+            if self.cfg_env.collision_boundaries.add_table_offset:
+                TABLE_OFFSET_COLLISION_FILTER = 0b1111111111111111111111111111111
+                table_offset_handle = self.gym.create_actor(env_ptr, table_offset_asset, gymapi.Transform(p=gymapi.Vec3(0.28, 0.33 + 0.25, 0.)), 'table_offset', env_index, TABLE_OFFSET_COLLISION_FILTER, 0)
+
+                #actor_shape_props = self.gym.get_actor_rigid_shape_properties(self.env_ptrs[env_id], actor_handle)
+                #for shape_id in range(len(actor_shape_props)):
+                #    actor_shape_props[shape_id].filter = collision_filter
+                #self.gym.set_actor_rigid_shape_properties(self.env_ptrs[env_id], actor_handle, actor_shape_props)
+
+                actor_count += 1
+
             self.gym.end_aggregate(env_ptr)
             self.env_ptrs.append(env_ptr)
 
@@ -836,6 +874,8 @@ class HandArmEnvMultiObject(HandArmBase):
         self.object_actor_env_indices = [self.gym.find_actor_index(env_ptr, o.name, gymapi.DOMAIN_ENV) for o in [self.objects[i] for i in object_indices]]
         self.object_actor_env_indices_tensor = torch.tensor(self.object_actor_env_indices, dtype=torch.int32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.object_indices = torch.tensor(self.object_indices, dtype=torch.long, device=self.device)
+
+        self.object_rigid_body_env_indices = [self.gym.get_actor_rigid_body_index(self.env_ptrs[0], object_handle, 0, gymapi.DOMAIN_ENV) for object_handle in self.object_handles[0]]
 
         self.target_object_index = torch.zeros(self.num_envs, dtype=torch.int64, device=self.device)
         self.target_object_actor_env_index = torch.zeros(self.num_envs, dtype=torch.int64, device=self.device)
@@ -853,12 +893,18 @@ class HandArmEnvMultiObject(HandArmBase):
         
 
     def _disable_object_collisions(self, object_ids: List[int]):
-        self._set_object_collisions(object_ids, collision_filter=-1)
+        self._set_object_collisions(object_ids, collision_filters=[0b001 for _ in range(len(object_ids))])
 
     def _enable_object_collisions(self, object_ids: List[int]):
-        self._set_object_collisions(object_ids, collision_filter=0)
+        if len(object_ids) > 31:
+            raise ValueError("Cannot have more than 32 objects in the environment.")
+        
+        OBJECT_COLLISION_FILTER = [2**(i + 1) for i in object_ids]
+        # Objects get non-overlapping biswise collision filters so they collide with each other. Robot collides with everything anyways, and the other things like an artificial collision boundary can now be tuned to collide with whatever is needed.
 
-    def _set_object_collisions(self, object_ids: List[int], collision_filter: int) -> None:
+        self._set_object_collisions(object_ids, collision_filters=OBJECT_COLLISION_FILTER)
+
+    def _set_object_collisions(self, object_ids: List[int], collision_filters: List[int]) -> None:
         def set_collision_filter(env_id: int, actor_handle, collision_filter: int) -> None:
             actor_shape_props = self.gym.get_actor_rigid_shape_properties(self.env_ptrs[env_id], actor_handle)
             for shape_id in range(len(actor_shape_props)):
@@ -867,7 +913,7 @@ class HandArmEnvMultiObject(HandArmBase):
 
         # No tensor API to set actor rigid shape props, so a loop is required.
         for env_id in range(self.num_envs):
-            for object_id in object_ids:
+            for object_id, collision_filter in zip(object_ids, collision_filters):
                 set_collision_filter(env_id, self.object_handles[env_id][object_id], collision_filter)
 
     def objects_in_bin(self, object_pos: torch.Tensor) -> torch.BoolTensor:
@@ -1010,8 +1056,8 @@ class HandArmEnvMultiObject(HandArmBase):
 
     def _acquire_workspace_synthetic_pointcloud(self, num_samples: int) -> None:
         self.workspace_synthetic_pointcloud = torch.zeros((self.num_envs, num_samples, 4)).to(self.device)
-        self.workspace_synthetic_pointcloud[:, :, 0].uniform_(-0.07, 0.63)
-        self.workspace_synthetic_pointcloud[:, :, 1].uniform_(0.23, 0.83)
+        self.workspace_synthetic_pointcloud[:, :, 0].uniform_(self.cfg_env.workspace[0][0], self.cfg_env.workspace[1][0])
+        self.workspace_synthetic_pointcloud[:, :, 1].uniform_(self.cfg_env.workspace[0][1], self.cfg_env.workspace[1][1])
         self.workspace_synthetic_pointcloud[:, :, 3] = 1
 
     def _acquire_bin_synthetic_pointcloud(self, num_samples: int) -> None:
@@ -1057,114 +1103,20 @@ class HandArmEnvMultiObject(HandArmBase):
 
     def _init_sam_pointcloud(self, camera_name: str) -> None:
         setattr(self, f"{camera_name}_sam_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device))
-        from lang_sam import LangSAM
-        self.lang_sam = LangSAM("vit_b", "/home/user/mosbach/tools/sam_tracking/sam_tracking/ckpt/sam_vit_b_01ec64.pth")  # TODO: Check if there is a better model available. Speed is really not an issue here.
+        from isaacgymenvs.tasks.hand_arm.other_utils.lang_sam_interface import LangSamInterface
+        self.lang_sam_interface = LangSamInterface()
 
     def _refresh_sam_pointcloud(self, camera_name: str, pointcloud_id: int = 2) -> None:
         rgb = self.camera_dict[camera_name].current_sensor_observation[ImageType.RGB]
         pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].flatten(1, 2)
 
-        from PIL import Image
-
         segmented_pointclouds = []
         for env_index in range(self.num_envs):
-            self.sam_selection_submitted = False
             color_image_numpy = rgb[env_index].cpu().numpy()
-            self.input_points = []
-            self.input_labels = []
-            image_pil = Image.fromarray(color_image_numpy)
+            mask = self.lang_sam_interface.predict(color_image_numpy, title=f"Select target object for camera '{camera_name}' on env {env_index}.")
 
-            def update_mask_on_click(event):
-                if event.inaxes == ax_image:    
-                    self.input_points.append([event.xdata, event.ydata])
-                    self.input_labels.append(int(event.button == MouseButton.LEFT))
-                    self.lang_sam.sam.set_image(color_image_numpy)
-                    masks, scores, logits = self.lang_sam.sam.predict(point_coords=np.array(self.input_points).astype(np.int), point_labels=np.array(self.input_labels).astype(np.int), multimask_output=False)
-                    self.mask = masks[0]
-                    ax_image.imshow(color_image_numpy)
-                    show_mask(self.mask, ax_image)
-
-                    for point, label in zip(self.input_points, self.input_labels):
-                        col = 'green' if label == 1 else 'red'
-                        ax_image.scatter(point[0], point[1], color=col, edgecolors='white', s=50)
-                        
-                    sam_figure.canvas.draw()
-
-            def update_mask_on_text(text):
-                if text not in ['', 'Left-click to add positive marker, right-click to add negative marker.']:
-                    if len(self.input_points) > 0:
-                        print("Cannot use text input when markers have already been added.")
-                    else:
-                        masks, boxes, phrases, logits = self.lang_sam.predict(image_pil, text)
-                        self.mask = torch.any(masks, dim=0).cpu().numpy()
-
-                        #self.pred_mask, masked_frame = self.segtracker.detect_and_seg(color_image_numpy.copy(), text, 0.25, 0.25)
-                        #selected_segmentation = draw_mask(color_image_numpy.copy(), masks, id_countour=True)
-                        ax_image.imshow(color_image_numpy)
-                        show_mask(self.mask, ax_image)
-                        ax_image.axis('off')
-                        sam_figure.canvas.draw()
-
-            def on_hover_over_image(event):
-                if event.inaxes == ax_image and event.xdata is not None and event.ydata is not None:
-                    if text_box.text == "":
-                        text_box.set_val('Left-click to add positive marker, right-click to add negative marker.')
-                else:
-                    if text_box.text == 'Left-click to add positive marker, right-click to add negative marker.':
-                        text_box.set_val('')
-                sam_figure.canvas.draw()
-
-            def clear_button_clicked(event):
-                self.input_points = []
-                self.input_labels = []
-                self.mask = np.zeros_like(color_image_numpy)
-                ax_image.imshow(color_image_numpy)
-                sam_figure.canvas.draw()
-
-            def submit_button_clicked(event):
-                self.sam_selection_submitted = True
-
-            def on_resize(event):
-                bbox = ax_image.get_position()
-                ax_width = bbox.x1 - bbox.x0
-                ax_x = bbox.x0
-
-                ax_prompt.set_position([ax_x, 0.2, ax_width, 0.05])
-                ax_clear.set_position([ax_x, 0.1, ax_width / 2, 0.075])
-                ax_submit.set_position([ax_x + ax_width / 2, 0.1, ax_width / 2, 0.075])
-
-
-            sam_figure = plt.figure(num=f"Select target object for camera '{camera_name}' on env {env_index}.")
-            ax_image = sam_figure.add_subplot(111)
-            ax_image.axis('off')
-            sam_figure.subplots_adjust(bottom=0.2)
-            ax_prompt = sam_figure.add_axes([0.1, 0.2, 0.8, 0.05])
-            text_box = TextBox(ax_prompt, "", initial="")
-            text_box.on_submit(update_mask_on_text)
-
-            ax_clear = sam_figure.add_axes([0.1, 0.1, 0.4, 0.075])
-            ax_submit = sam_figure.add_axes([0.5, 0.1, 0.4, 0.075])
-            clear_button = Button(ax_clear, 'Clear')
-            submit_button = Button(ax_submit, 'Submit')
-            clear_button.on_clicked(clear_button_clicked)
-            submit_button.on_clicked(submit_button_clicked)
-
-            ax_image.imshow(color_image_numpy)
-            ax_image.set_position([0.1, 0.3, 0.8, 0.6])
-            sam_figure.canvas.mpl_connect('button_press_event', update_mask_on_click)
-            sam_figure.canvas.mpl_connect('motion_notify_event', on_hover_over_image)
-
-            sam_figure.canvas.mpl_connect('resize_event', on_resize)
-
-            plt.show(block=False)
-            
-            while not self.sam_selection_submitted:
-                plt.pause(0.01)
-
-            target_object_mask = torch.from_numpy(self.mask).to(self.device).flatten(0, 1)
+            target_object_mask = torch.from_numpy(mask).to(self.device).flatten(0, 1)
             segmented_pointcloud = pointcloud[env_index][target_object_mask]
-
-            print("target_object_mask:", target_object_mask)
 
             # More points are on the object than can fit into the padded point-cloud tensor. Subsample points.
             if len(segmented_pointcloud) > self.cfg_env.pointclouds.max_num_points:

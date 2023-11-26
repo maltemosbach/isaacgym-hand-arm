@@ -1,0 +1,60 @@
+<?xml version="1.0"?>
+<robot name="visible_collision_boundary">
+  <material name="white">
+    <color rgba="0.8 0.1 0.2 1.0"/>
+  </material>
+  <link name="base_link">
+    <visual>
+      <origin xyz="0.475 0 0.5"/>
+      <geometry>
+	 			<box size=".05 1.2 1.0"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.775 0 0.5"/>
+      <geometry>
+	 			<box size=".05 1.2 1.0"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.15 -0.625 0.5"/>
+      <geometry>
+	 			<box size="1.2 .05 1.0"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.15 0.625 0.5"/>
+      <geometry>
+	 			<box size="1.2 .05 1.0"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin xyz="0.35 0 0.5"/>
+      <geometry>
+	 			<box size=".05 1.0 1.0"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1997 0 0.024"/>
+      <geometry>
+	 			<box size=".015 .5 .125"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.1997 0.024"/>
+      <geometry>
+	 			<box size=".5 .015 .125"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0.1997 0.024"/>
+      <geometry>
+	 			<box size=".5 .015 .125"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

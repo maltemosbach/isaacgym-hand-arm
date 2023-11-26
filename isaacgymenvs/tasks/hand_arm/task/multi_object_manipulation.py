@@ -28,6 +28,48 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
     def _acquire_task_cfg(self) -> DictConfig:
         return hydra.compose(config_name=self._task_cfg_path)['task']
+    
+    def pre_physics_step(self, actions: torch.Tensor) -> None:
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        #reset_goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
+        #self.reset_target_pose(reset_goal_env_ids)
+
+        if len(actions.shape) == 1:
+            actions = actions.unsqueeze(0)
+
+        self.apply_controls(actions)
+
+        if self.cfg_task.rl.randomize:
+            def random_unit_vectors(shape: Sequence[int]):
+                vectors = torch.empty(shape + (3,), dtype=torch.float)
+                phi = torch.rand(shape) * np.pi * 2
+                costheta = torch.rand(shape) * 2 - 1
+                theta = torch.arccos(costheta)
+                vectors[..., 0] = torch.sin(theta) * torch.cos(phi)
+                vectors[..., 1] = torch.sin(theta) * torch.sin(phi)
+                vectors[..., 2] = torch.cos(theta)
+                return vectors
+            
+            forces = random_unit_vectors((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)
+            apply_force_mask = torch.rand((self.num_envs, self.cfg_env.objects.num_objects), device=self.device) < self.cfg_task.rl.randomization_params.object_disturbance.probability
+            force_multiplier = (apply_force_mask * self.object_mass).unsqueeze(2).repeat(1, 1, 3)
+            forces = forces * force_multiplier
+
+            force_tensor = torch.zeros((self.num_envs, self.num_bodies, 3), device=self.device)
+
+            print("self.object_rigid_body_env_indices:", self.object_rigid_body_env_indices)
+
+            force_tensor[torch.arange(self.num_envs), self.object_rigid_body_env_indices, :] = forces
+            print("verify me!")
+
+            self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(force_tensor), None, gymapi.ENV_SPACE)
+
+
+            
+
+
+        if len(reset_env_ids) > 0:
+            self.reset_idx(reset_env_ids)
 
     def reset_idx(self, env_ids):
         if self.objects_dropped:
@@ -35,8 +77,6 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
         else:
             self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.bringup)
             
-            
-            from tqdm import tqdm
             for dropping_sequence in range(self.cfg_env.objects.drop.num_initial_poses):
                 print("Dropping objects to find initial configuration:", dropping_sequence)
                 self._disable_object_collisions(object_ids=range(self.cfg_env.objects.num_objects))
