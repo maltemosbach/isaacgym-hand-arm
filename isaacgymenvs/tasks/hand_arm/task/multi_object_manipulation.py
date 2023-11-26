@@ -52,15 +52,12 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
             
             forces = random_unit_vectors((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)
             apply_force_mask = torch.rand((self.num_envs, self.cfg_env.objects.num_objects), device=self.device) < self.cfg_task.rl.randomization_params.object_disturbance.probability
-            force_multiplier = (apply_force_mask * self.object_mass).unsqueeze(2).repeat(1, 1, 3)
+            force_multiplier = (apply_force_mask * self.object_mass).unsqueeze(2).repeat(1, 1, 3)  * self.cfg_task.rl.randomization_params.object_disturbance.magnitude
             forces = forces * force_multiplier
 
             force_tensor = torch.zeros((self.num_envs, self.num_bodies, 3), device=self.device)
 
-            print("self.object_rigid_body_env_indices:", self.object_rigid_body_env_indices)
-
-            force_tensor[torch.arange(self.num_envs), self.object_rigid_body_env_indices, :] = forces
-            print("verify me!")
+            force_tensor[:, self.object_rigid_body_env_indices, :] = forces
 
             self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(force_tensor), None, gymapi.ENV_SPACE)
 
