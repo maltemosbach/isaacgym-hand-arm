@@ -1,5 +1,6 @@
-from isaacgymenvs.tasks.hand_arm.env.multi_object import HandArmEnvMultiObject
-from isaacgymenvs.tasks.hand_arm.base.observations import Observation
+from isaacgymenvs.tasks.hand_arm.env.multi_object import Ur5SihMultiObject
+from isaacgymenvs.tasks.hand_arm.utils.camera import PointType
+
 import hydra
 from omegaconf import DictConfig
 from isaacgym import gymapi, gymtorch, torch_utils
@@ -15,8 +16,8 @@ def randomize_rotation(rand0, rand1, x_unit_tensor, y_unit_tensor):
 
 
 
-class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
-    _task_cfg_path = 'task/HandArmTaskMultiObjectManipulation.yaml'
+class Ur5SihMultiObjectManipulation(Ur5SihMultiObject):
+    _task_cfg_path = 'task/Ur5SihMultiObjectManipulation.yaml'
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg_task = self._acquire_task_cfg()
@@ -28,51 +29,12 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
     def _acquire_task_cfg(self) -> DictConfig:
         return hydra.compose(config_name=self._task_cfg_path)['task']
-    
-    def pre_physics_step(self, actions: torch.Tensor) -> None:
-        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-        #reset_goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
-        #self.reset_target_pose(reset_goal_env_ids)
-
-        if len(actions.shape) == 1:
-            actions = actions.unsqueeze(0)
-
-        self.apply_controls(actions)
-
-        if self.cfg_task.rl.randomize:
-            def random_unit_vectors(shape: Sequence[int]):
-                vectors = torch.empty(shape + (3,), dtype=torch.float)
-                phi = torch.rand(shape) * np.pi * 2
-                costheta = torch.rand(shape) * 2 - 1
-                theta = torch.arccos(costheta)
-                vectors[..., 0] = torch.sin(theta) * torch.cos(phi)
-                vectors[..., 1] = torch.sin(theta) * torch.sin(phi)
-                vectors[..., 2] = torch.cos(theta)
-                return vectors
-            
-            forces = random_unit_vectors((self.num_envs, self.cfg_env.objects.num_objects)).to(self.device)
-            apply_force_mask = torch.rand((self.num_envs, self.cfg_env.objects.num_objects), device=self.device) < self.cfg_task.rl.randomization_params.object_disturbance.probability
-            force_multiplier = (apply_force_mask * self.object_mass).unsqueeze(2).repeat(1, 1, 3)  * self.cfg_task.rl.randomization_params.object_disturbance.magnitude
-            forces = forces * force_multiplier
-
-            force_tensor = torch.zeros((self.num_envs, self.num_bodies, 3), device=self.device)
-
-            force_tensor[:, self.object_rigid_body_env_indices, :] = forces
-
-            self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(force_tensor), None, gymapi.ENV_SPACE)
-
-
-            
-
-
-        if len(reset_env_ids) > 0:
-            self.reset_idx(reset_env_ids)
 
     def reset_idx(self, env_ids):
         if self.objects_dropped:
             self._reset_objects(env_ids)
         else:
-            self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.bringup)
+            self._reset_ur5sih(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.bringup)
             
             for dropping_sequence in range(self.cfg_env.objects.drop.num_initial_poses):
                 print("Dropping objects to find initial configuration:", dropping_sequence)
@@ -82,24 +44,30 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
 
             # Finialize initial object poses.
             for attribute in dir(self):
-                if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and not attribute.endswith("_initial") and not attribute == "object_configuration_indices":
-                    setattr(self, attribute + "_initial", torch.stack(getattr(self, attribute + "_initial_list"), dim=1))
+                if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and "initial" not in attribute and not attribute == "object_configuration_indices":
+                    if attribute.endswith("_pointcloud"):
+                        getattr(self, attribute[:-10] + "initial_pointcloud")[:] = torch.stack(getattr(self, attribute + "_initial_list"), dim=1)
+                    elif attribute.endswith("_pointcloud_ordered"):
+                        continue
+                    else:
+                        setattr(self, attribute + "_initial", torch.stack(getattr(self, attribute + "_initial_list"), dim=1))
                     getattr(self, attribute + "_initial_list").clear()
-                    if attribute.endswith("pointcloud"):
-                        getattr(self, attribute + "_initial")[..., 3] *= 3  # Three is now the semantic value of initial pointclouds.
+
+                    if "pointcloud" in attribute:
+                        getattr(self, attribute[:-10] + "initial_pointcloud")[..., 3] *= PointType.INITIAL.value
 
             self.objects_dropped = True
             self._reset_objects(env_ids)
 
         self._reset_target_object(env_ids)
         self._reset_goal(env_ids)
-        self._reset_robot(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.reset)
+        self._reset_ur5sih(env_ids, reset_dof_pos=self.cfg_base.asset.joint_configurations.reset)
 
         self.gym.simulate(self.sim)  # Simulate for one step and refresh base tensors to update the buffers (i.e. fingertip positions etc.)
 
-        self.refresh_base_tensors()
-        self.reset_observation_tensors()
-        self._reset_buffers(env_ids)
+        self.refresh_simulation_tensors()
+        
+        super().reset_idx(env_ids)
 
     def _reset_objects(self, env_ids):
         # Sample object configuration to reset to.
@@ -154,29 +122,34 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                     for _ in range(self.cfg_env.objects.drop.num_steps):
                         self.gym.simulate(self.sim)
                         self.render()
-                        self.refresh_base_tensors()
-                        if len(self.cfg_base.debug.visualize) > 0 and not self.headless:
-                            self.gym.clear_lines(self.viewer)
-                            self.draw_visualizations(self.cfg_base.debug.visualize)
+                        #self.refresh_simulation_tensors()
+                        #self.refresh_observations()
+                        #if len(self.cfg_base.debug.visualize) > 0 and not self.headless:
+                        #    self.gym.clear_lines(self.viewer)
+                        #    self.draw_visualizations(self.cfg_base.debug.visualize)
 
             # Refresh tensor and save initial object poses.
-            self.refresh_base_tensors()
+            self.refresh_simulation_tensors()
+            self._sorted_observations['object_pos'].callback.post_step()  # Refresh object pos to check whether objects landed in bin.
             objects_in_bin[:] = self.objects_in_bin(self.object_pos)
 
         # Let the scene settle.
         for time_step in range(600):
             self.gym.simulate(self.sim)
-            self.refresh_base_tensors()
+            self.refresh_simulation_tensors()
+            self._sorted_observations['object_linvel'].callback.post_step()  # Refresh object linvel to check whether the scene has settled.
             if torch.all(torch.max(torch.norm(self.object_linvel, dim=2), dim=1).values < 0.01):
                 break
 
             self.render()
         
-        self.refresh_base_tensors()
+        self.refresh_simulation_tensors()
+
+        for observable in self._sorted_observations.values():
+            observable.callback.post_step()
 
         for attribute in dir(self):
-            if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and not attribute.endswith("_initial") and not attribute == "object_configuration_indices":
-                print("attribute", attribute)
+            if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and "initial" not in attribute and not attribute == "object_configuration_indices":
                 if not hasattr(self, attribute + "_initial_list"):
                     setattr(self, attribute + "_initial_list", [])
                 getattr(self, attribute + "_initial_list").append(getattr(self, attribute).detach().clone())
@@ -278,9 +251,9 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                 reward = scale * (torch.exp(-lifting_reward_temp * delta_h) - torch.exp(-lifting_reward_temp * torch.ones_like(delta_h)))
             
             elif reward_term == 'reaching':
-                target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.fingertip_pos.shape[1], 1)
+                target_object_pos_expanded = self.target_object_pos.unsqueeze(1).repeat(1, self.sih_fingertip_pos.shape[1], 1)
                 #fingertip_distance = torch.min(torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2), dim=1).values
-                fingertip_distance = torch.norm(self.fingertip_pos - target_object_pos_expanded, dim=2)
+                fingertip_distance = torch.norm(self.sih_fingertip_pos - target_object_pos_expanded, dim=2)
                 fingertip_distance[:, 0] *= 4.0  # Thumb is always necessary for grasping with SIH.
                 fingertip_distance = torch.sum(fingertip_distance, dim=1)
 
@@ -303,7 +276,7 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                 reward = torch.clip(reward, -10, 0)
 
             elif reward_term == 'dof_velocity_penalty':
-                vel_max, _ = torch.max(self.dof_vel[:, 0:self.arm_dof_count], dim=1)
+                vel_max, _ = torch.max(self.dof_vel[:, 0:6], dim=1)
                 dof_vel = torch.abs(vel_max)
                 dof_vel_threshold = 0.5
                 dof_vel_penalty_temp = 1.0
@@ -315,15 +288,15 @@ class HandArmTaskMultiObjectManipulation(HandArmEnvMultiObject):
                 reward = torch.clip(reward, -10, 0)
 
             elif reward_term == 'collision_penalty':
-                contact_force_magnitude = torch.max(torch.norm(self.contact_force, dim=2), dim=1).values
-                contact_force_threshold = 2.5
+                contact_force_magnitude = torch.max(torch.norm(self.contact_force[:, self.ur5sih_rigid_body_env_indices[7:]], dim=2), dim=1).values
+                contact_force_threshold = 1.0
                 contact_force_penalty_temp = 1.0
                 reward = -scale * torch.where(
                     contact_force_magnitude > contact_force_threshold, 
                     torch.exp(contact_force_penalty_temp * (contact_force_magnitude - contact_force_threshold)) - 1.0, 
                     torch.zeros_like(contact_force_magnitude)
                 )
-                reward = torch.clip(reward, -2.0, 0)
+                reward = torch.clip(reward, -1.0, 0)
 
 
 

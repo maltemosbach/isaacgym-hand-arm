@@ -1,9 +1,7 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections import defaultdict
 import cv2
-from dataclasses import dataclass, field
 from enum import Enum
-import itertools
 from isaacgym import gymapi, gymtorch
 import numpy as np
 import hydra
@@ -11,46 +9,11 @@ import os
 import torch
 from typing import Dict, List, Optional, Sequence, Tuple
 import warnings
-from typing import Any
 
 
-
-
-def subsample_pointcloud(pointcloud: torch.Tensor, num_samples: int) -> torch.Tensor:
-    batch_size, num_points_padded, _ = pointcloud.shape
-
-    valid_mask = pointcloud[:, :, 3] > 0.5
-
-    valid_points = pointcloud[valid_mask][:, :3]
-    valid_points = valid_points[torch.randperm(valid_points.shape[0])]
-
-    valid_counts = valid_mask.sum(dim=1)
-
-
-    cumsum_valid_counts = torch.cumsum(valid_counts, dim=0)
-    indices = torch.arange(num_samples, device=pointcloud.device).unsqueeze(0).expand(batch_size, num_samples)
-
-    indices = indices + cumsum_valid_counts.unsqueeze(1) - valid_counts.unsqueeze(1)
-    indices = indices.clamp(min=0, max=len(valid_points) - 1)
-
-    gathered_points = valid_points[indices]
-
-    valid_points_mask = torch.ones_like(gathered_points[:, :, 0])
-
-    padding_mask = torch.arange(num_samples, device=pointcloud.device).expand_as(indices) >= valid_counts.unsqueeze(1)
-    valid_points_mask[padding_mask] = 0.
-
-    gathered_points[padding_mask] = 0.
-
-    gathered_points = torch.cat([gathered_points, valid_points_mask.unsqueeze(-1)], dim=-1)
-
-    return gathered_points
-
-
-
-# Extends IsaacGym's ImageType enum and specifies base type required for computation of the outpus.
+# Extends IsaacGym's ImageType enum and specifies base types required for computation of the outputs.
 class ImageType(Enum):
-    RGB = ("RGB", (3,), torch.uint8, [gymapi.ImageType.IMAGE_COLOR])
+    COLOR = ("COLOR", (3,), torch.uint8, [gymapi.ImageType.IMAGE_COLOR])
     DEPTH = ("DEPTH", (), torch.float32, [gymapi.ImageType.IMAGE_DEPTH])
     SEGMENTATION = ("SEGMENTATION", (), torch.int32, [gymapi.ImageType.IMAGE_SEGMENTATION])
     POINTCLOUD = ("POINTCLOUD", (4,), torch.float32, [gymapi.ImageType.IMAGE_DEPTH])
@@ -72,6 +35,13 @@ class ImageType(Enum):
     @property
     def required_isaacgym_image_types(self) -> List[gymapi.ImageType]:
         return self._required_isaacgym_image_types
+    
+
+class PointType(Enum):
+    PADDING = 0
+    REGULAR = 1
+    TARGET = 2
+    INITIAL = 3
 
 
 def depth_image_to_global_points(depth_image, proj_mat, view_mat, device: torch.device):
@@ -262,7 +232,7 @@ class CameraSensor(CameraSensorProperties, ABC):
                 self.current_sensor_observation[image_type] = torch.zeros((num_envs, self.height, self.width, *image_type.size), device=device, dtype=image_type.dtype)
 
             # Extend by required base images.
-            for image_type in [ImageType.RGB, ImageType.DEPTH, ImageType.SEGMENTATION]:
+            for image_type in [ImageType.COLOR, ImageType.DEPTH, ImageType.SEGMENTATION]:
                 if image_type.required_isaacgym_image_types[0] in self.required_isaacgym_image_types:
                     if image_type not in self.current_sensor_observation:
                         self.current_sensor_observation[image_type] = torch.zeros((num_envs, self.height, self.width, *image_type.size), device=device, dtype=image_type.dtype)
@@ -301,11 +271,23 @@ class IsaacGymCameraSensor(CameraSensor):
             camera_tensor = gym.get_camera_image_gpu_tensor(sim, env_ptr, camera_handle, image_type)
             torch_camera_tensor = gymtorch.wrap_tensor(camera_tensor)
             self._camera_tensors[image_type].append(torch_camera_tensor)
+    
+    def refresh_color(self) -> None:
+        self.current_sensor_observation[ImageType.COLOR][:] = torch.stack(self._camera_tensors[gymapi.ImageType.IMAGE_COLOR])[..., 0:3]
+
+    def refresh_depth(self) -> None:
+        self.current_sensor_observation[ImageType.DEPTH][:] = torch.stack(self._camera_tensors[gymapi.ImageType.IMAGE_DEPTH])
+
+    def refresh_segmentation(self) -> None:
+        self.current_sensor_observation[ImageType.SEGMENTATION][:] = torch.stack(self._camera_tensors[gymapi.ImageType.IMAGE_SEGMENTATION])
+
+    def refresh_pointcloud(self) -> None:
+        self.current_sensor_observation[ImageType.POINTCLOUD][:] = self._compute_pointcloud()
 
     def refresh_inside_gpu_access(self) -> None:
-        for image_type in [ImageType.RGB, ImageType.DEPTH, ImageType.SEGMENTATION]:
+        for image_type in [ImageType.COLOR, ImageType.DEPTH, ImageType.SEGMENTATION]:
             if image_type.required_isaacgym_image_types[0] in self._camera_tensors:
-                if image_type == ImageType.RGB:
+                if image_type == ImageType.COLOR:
                     self.current_sensor_observation[image_type][:] = torch.stack(self._camera_tensors[image_type.required_isaacgym_image_types[0]])[..., 0:3]
                 else:
                     self.current_sensor_observation[image_type][:] = torch.stack(self._camera_tensors[image_type.required_isaacgym_image_types[0]])
