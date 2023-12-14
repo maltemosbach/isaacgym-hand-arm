@@ -47,24 +47,34 @@ class ObservableVecTask(VecTask):
 
         # Register corresponding camera observables.
         for camera_name, camera_sensor in self._camera_dict.items():
-            #camera_properties = CameraSensorProperties(**self.cfg_env.cameras[camera_name], image_types=["color"])
-            for image_type in ["color", "depth", "segmentation", "pointcloud"]:
-                if image_type == "color":
-                    self.register_observable(
-                        ColorObservable(
-                            name=f"{camera_name}_{image_type}",
-                            camera_sensor=camera_sensor,
-                        )
+
+            self.register_observable(
+                ColorObservable(
+                    name=f"{camera_name}_color",
+                    camera_sensor=camera_sensor,
+                )
+            )
+            self.register_observable(
+                PointcloudObservable(
+                    name=f"{camera_name}_pointcloud",
+                    camera_sensor=camera_sensor,
+                )
+            )
+
+            if isinstance(camera_sensor, IsaacGymCameraSensor):
+                self.register_observable(
+                    DepthObservable(
+                        name=f"{camera_name}_depth",
+                        camera_sensor=camera_sensor,
                     )
-                elif image_type == "pointcloud":
-                    self.register_observable(
-                        PointcloudObservable(
-                            name=f"{camera_name}_{image_type}",
-                            camera_sensor=camera_sensor,
-                        )
+                )
+                self.register_observable(
+                    SegmenationObservable(
+                        name=f"{camera_name}_segmentation",
+                        camera_sensor=camera_sensor,
                     )
-                else:
-                    pass
+                )
+
 
     def _acquire_camera_dict(self) -> Dict[str, CameraSensor]:
         camera_dict = {}
@@ -89,9 +99,9 @@ class ObservableVecTask(VecTask):
             resolution: Optional[Tuple[int, int]] = None
     ) -> None:
         if self.cfg_base.ros.activate:
-            return ROSCameraSensor(image_types, pos, quat, model, fovx, resolution)
+            return ROSCameraSensor(image_types, **kwargs)
         else:
-            return IsaacGymCameraSensor(image_types, pos, quat, model, fovx, resolution)
+            return IsaacGymCameraSensor(image_types, **kwargs)
     
     def register_observable(self, observable: Observable) -> None:
         self._registered_observables[observable.name] = observable

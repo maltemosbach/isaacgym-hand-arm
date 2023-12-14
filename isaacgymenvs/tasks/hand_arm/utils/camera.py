@@ -6,6 +6,8 @@ from isaacgym import gymapi, gymtorch
 import numpy as np
 import hydra
 import os
+import rospy
+from sensor_msgs.msg import Image, PointCloud2
 import torch
 from typing import Dict, List, Optional, Sequence, Tuple
 import warnings
@@ -17,6 +19,7 @@ class ImageType(Enum):
     DEPTH = ("DEPTH", (), torch.float32, [gymapi.ImageType.IMAGE_DEPTH])
     SEGMENTATION = ("SEGMENTATION", (), torch.int32, [gymapi.ImageType.IMAGE_SEGMENTATION])
     POINTCLOUD = ("POINTCLOUD", (4,), torch.float32, [gymapi.ImageType.IMAGE_DEPTH])
+    SEGMENTED_POINTCLOUD = ("SEGMENTED_POINTCLOUD", (4,), torch.float32, [gymapi.ImageType.IMAGE_SEGMENTATION, gymapi.ImageType.IMAGE_DEPTH])
 
     def __init__(self, name: str, size: Sequence[int], dtype: torch.dtype, required_isaacgym_image_types: List[gymapi.ImageType]) -> None:
         self._name = name
@@ -41,7 +44,7 @@ class PointType(Enum):
     PADDING = 0
     REGULAR = 1
     TARGET = 2
-    INITIAL = 3
+    GOAL = 3
 
 
 def depth_image_to_global_points(depth_image, proj_mat, view_mat, device: torch.device):
@@ -76,7 +79,6 @@ def global_to_environment_points(points: torch.Tensor, env_spacing: float = 1.):
         points[env_index, ..., 0] -= column * 2 * env_spacing
         points[env_index, ..., 1] -= row * 2 * env_spacing
     return points
-
 
 
 class CameraSensorProperties:
@@ -145,6 +147,7 @@ class CameraSensorProperties:
 
     @fovx.setter
     def fovx(self, value: int) -> None:
+        value = 1 if value is None else value
         if not 0 < value < 180:
             raise ValueError(f"Horizontal field-of-view (fovx) should be in [0, 180], but found '{value}'.")
         self._fovx = value
@@ -327,28 +330,51 @@ class IsaacGymCameraSensor(CameraSensor):
                 view_mat.append(torch.from_numpy(self.gym.get_camera_view_matrix(self.sim, env_ptr, self._camera_handles[env_index])).to(self.device))
             self._view_matrix = torch.stack(view_mat)
         return self._view_matrix
-    
+
 
 class ROSCameraSensor(CameraSensor):
     def __init__(
             self,
             sensor_outputs: List[str],
-            pos: Tuple[float, float, float] = (0, 0, 0),
-            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
-            model: Optional[str] = None,
-            fovx: Optional[int] = None,
+            color_topic: Optional[str] = None,
+            pointcloud_topic: Optional[str] = None,
             resolution: Optional[Tuple[int, int]] = None
     ) -> None:
-        super().__init__(sensor_outputs, pos, quat, model, fovx, resolution)
+        super().__init__(sensor_outputs, resolution=resolution)
 
-    def get_image(self) -> torch.Tensor:
+        if "color" in sensor_outputs:
+            self._color_subscriber = rospy.Subscriber(color_topic, Image, self._color_callback)
+
+        if "pointcloud" in sensor_outputs:
+            self._pointcloud_subscriber = rospy.Subscriber(pointcloud_topic, PointCloud2, self._pointcloud_callback)
+
+        self._color_image = None
+        self._pointcloud = None
+
+    def _color_callback(self, msg: Image) -> None:
+        self._color_image = msg
+
+    def _pointcloud_callback(self, msg: PointCloud2) -> None:
+        self._pointcloud = msg
+
+    def refresh_color(self) -> None:
+        if self._color_image is not None:
+            self.current_sensor_observation[ImageType.COLOR][0] = torch.from_numpy(np.frombuffer(self._color_image.data, dtype=np.uint8).reshape(self._color_image.height, self._color_image.width, 3))
+        else:
+            warnings.warn("No color image received yet.")
+
+    def refresh_depth(self) -> None:
         pass
 
-    def get_depth(self) -> torch.Tensor:
-        pass
+    def refresh_pointcloud(self) -> None:
+        if self._pointcloud is not None:
+            self.current_sensor_observation[ImageType.POINTCLOUD][0] = torch.from_numpy(np.frombuffer(self._pointcloud.data, dtype=np.float32).reshape(self._poincloud.height, self._pointcloud.width, 4))
+        else:
+            warnings.warn("No pointcloud received yet.")
 
-    def get_pointcloud(self, max_depth: float = 10) -> torch.Tensor:
-        pass
+        print("self.current_sensor_observation[ImageType.POINTCLOUD][0].shape", self.current_sensor_observation[ImageType.POINTCLOUD][0].shape)
+        print("self.current_sensor_observation[ImageType.POINTCLOUD][0]", self.current_sensor_observation[ImageType.POINTCLOUD][0])
+        input()
 
 
 class CameraMixin:

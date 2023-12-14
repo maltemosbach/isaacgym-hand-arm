@@ -99,7 +99,10 @@ def visualize_color_image(
 
 
 def visualize_depth_image(
-    depth_image: torch.Tensor,
+    gym,
+    viewer,
+    env_ptrs,
+    get_depth_image: Callable[[], torch.Tensor],
     window_name: str = "depth image",
     env_indices: Sequence[int] = (0,),
     max_depth: float = 2.0
@@ -108,15 +111,19 @@ def visualize_depth_image(
     visualize_color_image(color_image, window_name, env_indices)
 
 
-def visualize_semantic_image(
-    semantic_image: torch.Tensor,
+def visualize_segmentation_image(
+    gym,
+    viewer,
+    env_ptrs,
+    get_segmentation_image: Callable[[], torch.Tensor],
     window_name: str = "semantic image",
     env_indices: Sequence[int] = (0,)
     ) -> None:
-    colormap = get_pascal_voc_colormap(torch.max(semantic_image) + 1)
-    color_image = torch.zeros_like(semantic_image, dtype=torch.uint8).unsqueeze(-1).repeat(1, 1, 1, 3)
+    segmentation_image = get_segmentation_image()
+    colormap = get_pascal_voc_colormap(torch.max(segmentation_image) + 1)
+    color_image = torch.zeros_like(segmentation_image, dtype=torch.uint8).unsqueeze(-1).repeat(1, 1, 1, 3)
 
-    for label in range(torch.max(semantic_image) + 1):
-        color_image[semantic_image == label] = torch.tensor(colormap[label], dtype=torch.uint8).to(semantic_image.device)
+    for label in range(torch.max(segmentation_image) + 1):
+        color_image[segmentation_image == label] = torch.tensor(colormap[label], dtype=torch.uint8).to(segmentation_image.device)
     
-    visualize_color_image(color_image, window_name, env_indices)
+    visualize_color_image(gym, viewer, env_ptrs, lambda: color_image, window_name, env_indices)
