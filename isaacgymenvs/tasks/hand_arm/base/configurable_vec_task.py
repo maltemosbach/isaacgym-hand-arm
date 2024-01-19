@@ -2,6 +2,7 @@ from isaacgym import gymapi
 from isaacgymenvs.tasks.hand_arm.base.actionable_vec_task import ActionableVecTask
 from isaacgymenvs.tasks.hand_arm.base.observable_vec_task import ObservableVecTask
 from isaacgymenvs.tasks.hand_arm.utils.observables import CameraObservable
+import time
 import torch
 from typing import Dict, Any
 
@@ -13,6 +14,8 @@ class ConfigurableVecTask(ObservableVecTask, ActionableVecTask):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg = cfg  # Required for VecTask.
         self.cfg["headless"] = headless  # Required for VecTask.
+
+        self.ros_last_frame_time: float = 0.0
         
         ActionableVecTask.__init__(self)
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, True)
@@ -21,6 +24,13 @@ class ConfigurableVecTask(ObservableVecTask, ActionableVecTask):
 
         if self.viewer is not None:
             self._set_viewer_params()
+
+        if self.cfg_base.ros.activate:
+            import os
+            import rospy
+            os.environ["ROS_MASTER_URI"] = self.cfg_base.ros.master_uri
+            rospy.init_node('isaacgym_hand_arm_simulation', anonymous=True)
+            input("Created ROS node. Press Enter to continue...")
 
         for actionable in self._sorted_actions.values():
             actionable.callback.post_init()
@@ -103,10 +113,29 @@ class ConfigurableVecTask(ObservableVecTask, ActionableVecTask):
         self.compute_reward()
         self.compute_observations()
 
+        if self._camera_dict and self.cfg_base.debug.camera.save_recordings:
+                self._write_recordings()
+
         if len(self.cfg_base["debug"]["visualize"]) > 0 and not self.headless:
             self.gym.clear_lines(self.viewer)
-
             self.draw_visualizations(self.cfg_base["debug"]["visualize"])
+
+        if False:
+            #for i in range(self.control_freq_inv):
+            #    self.gym.sync_frame_time(self.sim)
+
+            now = time.time()
+            delta = now - self.ros_last_frame_time
+            #print("render_fps = ", self.render_fps)
+            #print("1 / delta = ", 1.0 / delta)
+            #print("delta = ", delta)
+            #print("self.dt * self.control_freq_inv = ", self.dt * self.control_freq_inv)
+
+            render_dt = self.dt * self.control_freq_inv  # render every control step
+
+            if delta < render_dt:
+                time.sleep(render_dt - delta)
+            self.ros_last_frame_time = time.time()
 
     def compute_reward(self):
         self._update_reset_buf()

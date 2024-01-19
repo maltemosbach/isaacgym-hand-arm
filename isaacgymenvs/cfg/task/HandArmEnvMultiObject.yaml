@@ -10,8 +10,8 @@ objects:
   drop:  # Positions from which objects are dropped.
     pos: [0.28, 0.58, 0.5]
     noise: [0.1, 0.1, 0.0]
-    num_steps: 50
-    num_initial_poses: 3  # Number of initial poses sampled for each environment.
+    num_steps: 100
+    num_initial_poses: 1  # Number of initial poses sampled for each environment.
 
     
   goal:  # Goal positions to which objects must be moved.
@@ -23,7 +23,11 @@ bin:
   pos: [0.28, 0.58, 0.001]
   quat: [0, 0, -0.707, 0.707]
 
-workspace: [[-0.07, 0.23, 0.0], [0.63, 0.83, 0.75]]
+workspace: [[-0.07, 0.33, 0.0], [0.63, 0.83, 0.6]]
+
+collision_boundaries:
+  add_table_offset: True
+  add_safety_walls: False
 
 
 cameras:
@@ -38,8 +42,9 @@ cameras:
     pos: [ 0.28, 0.95, 0.5 ]
     quat: [ 0.213, 0.213, -0.674, 0.674 ]
     fovx: 87
-    #resolution: [1920, 1080]
-    resolution: [64, 64]
+    #resolution: [1280, 720]
+    #resolution: [320, 180]
+    resolution: [160, 90]
 
 pointclouds:
   average_num_points: 200
@@ -47,5 +52,5 @@ pointclouds:
   sample_mode: 'area'
 
 debug:
-  highlight_target_object: True
+  highlight_target_object: False
   target_object_color: [0, 1, 0]

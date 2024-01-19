@@ -1,0 +1,62 @@
+objects:
+  num_objects: 3  # Number of objects dropped into each bin.
+  
+
+  dataset:
+    #contactdb: ['*']
+    egad: []
+    ycb: ['015_peach', '005_tomato_soup_can', '006_mustard_bottle'] #, '014_lemon', '015_peach', '016_pear'] #['004_sugar_box', '005_tomato_soup_can', '006_mustard_bottle', '007_tuna_fish_can', ] #'008_pudding_box', '009_gelatin_box', '010_potted_meat_can', '012_strawberry', '013_apple', '014_lemon', '015_peach', '016_pear', '017_orange', '018_plum', '022_windex_bottle', '026_sponge', '031_spoon', '032_knife', '033_spatula', '036_wood_block', '037_scissors', '038_padlock', '040_large_marker', '042_adjustable_wrench', '043_phillips_screwdriver', '044_flat_screwdriver', '050_medium_clamp', '054_softball', '056_tennis_ball', '057_racquetball', '061_foam_brick', '063-a_marbles', '063-b_marbles', '065-a_cups', '065-b_cups', '065-d_cups', '065-e_cups', '065-f_cups', '065-h_cups', '065-i_cups', '072-d_toy_airplane', '072-e_toy_airplane', '073-a_lego_duplo', '073-c_lego_duplo', '073-d_lego_duplo', '073-e_lego_duplo', '073-f_lego_duplo', '077_rubiks_cube']
+
+  drop:  # Positions from which objects are dropped.
+    pos: [0.28, 0.58, 1.5]
+    noise: [0.1, 0.1, 0.0]
+    num_steps: 100
+    num_initial_poses: 1  # Number of initial poses sampled for each environment.
+
+    
+  goal:  # Goal positions to which objects must be moved.
+    pos: [0.28, 0.58, 0.8]
+    noise: [0.15, 0.15, 0.1]
+
+bin:
+  asset: 'no_bin'
+  pos: [0.28, 0.53, 0.0]
+  quat: [0, 0, -0.707, 0.707]
+
+table_height: 0.5
+
+workspace: [[-0.07, 0.33, 0.0], [0.63, 0.83, 0.6]]
+
+collision_boundaries:
+  add_table_offset: False
+  add_safety_walls: False
+
+
+cameras:
+  frontview:
+    pos: [ 0.253, 1.051, 0.33 ]
+    quat: [ 0.09, 0.1, -0.707, 0.695 ]
+    fovx: 87
+    resolution: [640, 480]
+
+  topview:
+    pos: [ 0.28, 1.05, 0.5 ]
+    quat: [ 0.213, 0.213, -0.674, 0.674 ]
+    fovx: 87
+    #resolution: [1280, 720]
+    #resolution: [320, 180]
+    resolution: [160, 90]
+
+  d455_frontview:
+    color_topic: 'd455/camera/color/image_raw'
+    pointcloud_topic: 'd455/camera/depth_registered/points'
+    resolution: [1280, 720]
+
+pointclouds:
+  average_num_points: 100
+  max_num_points: 128
+  sample_mode: 'area'
+
+debug:
+  highlight_target_object: True
+  target_object_color: [0, 1, 0]

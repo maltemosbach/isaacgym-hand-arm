@@ -1,0 +1,34 @@
+asset:
+  dof_properties:
+    prop_gain: [120., 120., 120., 120., 120., 120., 20., 10., 20., 10., 20., 10., 20., 10., 20., 20., 10.]
+    deriv_gain: [20., 20., 20., 20., 20., 20., 6., 2., 6., 2., 6., 2., 6., 2., 6., 6., 2.]
+
+  joint_configurations:
+    bringup: [0., -1.571, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., -1.571, 0., 0.]
+    reset: [0.6985, -1.4106, 1.2932, 0.1174, 0.6983, 1.5708, 0., 0., 0., 0., 0., 0., 0., 0., -1.571, 0., 0.]
+
+debug:
+  camera:
+    save_recordings: False
+    write_frames_every: 'step'  # Options {'dt', 'step'}.
+
+  visualize: [] #['ur5_flange_pose', 'ur5sih_synthetic_pointcloud', 'object_synthetic_pointcloud'] #['topview_sam_pos_initial', 'topview_sam_initial-pointcloud'] # ['workspace_extent', 'topview_target_object_initial-pointcloud', 'topview-rgb'] #['target_object_synthetic-pointcloud', 'robot_synthetic-pointcloud']
+
+logging:
+  wandb:
+    add_checkpoints: True
+    add_config_files: True
+    watch_model: True
+
+ros:
+  activate: False  # Whether to publish commands to ROS.
+  master_uri: http://robo15:11311/  # URI of the ROS master.
+
+sim:
+  dt: 0.016666667   # 60 Hz.
+  num_substeps: 2  # Number of substeps has a large, almost linear impact on FPS performance.
+  num_pos_iters: 8  # Number of position iterations for the constraint solver.
+  num_vel_iters: 0  # Number of velocity iterations for the constraint solver.
+  gravity_mag: 9.81
+  aggregate_mode: 2  # Whether to create aggregate groups. 0: don't aggregate; 1: aggregate only task-specific actors; >1: aggregate all actors.
+  env_spacing: 1.0

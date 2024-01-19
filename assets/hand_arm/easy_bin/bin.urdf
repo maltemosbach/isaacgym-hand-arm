@@ -5,62 +5,69 @@
   </material>
   <link name="base_link">
     <visual>
-      <origin rpy="0 0 0" xyz="0 0 0.0"/>
+      <origin rpy="0 0 0" xyz="0 0 -0.0625"/>
       <geometry>
-	 			<box size=".4 .4 .0001"/>
+        <box size=".4 .4 .0001"/>
       </geometry>
       <material name="white"/>
     </visual>
     <visual>
-      <origin rpy="0 1.0472 0" xyz="0.1997 0 0.024"/>
+      <origin rpy="0 1.0472 0" xyz="0.1997 0 -0.0385"/>
+      <geometry>
+        <box size=".015 .5 .125"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <visual>
+      <origin rpy="0 -1.0472 0" xyz="-0.1997 0 -0.0385"/>
       <geometry>
 	 			<box size=".015 .5 .125"/>
       </geometry>
       <material name="white"/>
     </visual>
     <visual>
-      <origin rpy="0 -1.0472 0" xyz="-0.1997 0 0.024"/>
-      <geometry>
-	 			<box size=".015 .5 .125"/>
-      </geometry>
-      <material name="white"/>
-    </visual>
-    <visual>
-      <origin rpy="1.0472 0 0" xyz="0 -0.1997 0.024"/>
+      <origin rpy="1.0472 0 0" xyz="0 -0.1997 -0.0385"/>
       <geometry>
 	 			<box size=".5 .015 .125"/>
       </geometry>
       <material name="white"/>
     </visual>
     <visual>
-      <origin rpy="-1.0472 0 0" xyz="0 0.1997 0.024"/>
+      <origin rpy="-1.0472 0 0" xyz="0 0.1997 -0.0385"/>
       <geometry>
 	 			<box size=".5 .015 .125"/>
       </geometry>
       <material name="white"/>
     </visual>
     <collision>
-      <origin rpy="0 1.0472 0" xyz="0.1997 0 0.024"/>
-      <geometry>
-	 			<box size=".015 .5 .125"/>
-      </geometry>
-    </collision>
-    <collision>
-      <origin rpy="0 -1.0472 0" xyz="-0.1997 0 0.024"/>
+      <origin rpy="0 1.0472 0" xyz="0.1997 0 -0.0385"/>
       <geometry>
 	 			<box size=".015 .5 .125"/>
       </geometry>
     </collision>
     <collision>
-      <origin rpy="1.0472 0 0" xyz="0 -0.1997 0.024"/>
+      <origin rpy="0 -1.0472 0" xyz="-0.1997 0 -0.0385"/>
+      <geometry>
+	 			<box size=".015 .5 .125"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="1.0472 0 0" xyz="0 -0.1997 -0.0385"/>
       <geometry>
 	 			<box size=".5 .015 .125"/>
       </geometry>
     </collision>
     <collision>
-      <origin rpy="-1.0472 0 0" xyz="0 0.1997 0.024"/>
+      <origin rpy="-1.0472 0 0" xyz="0 0.1997 -0.0385"/>
       <geometry>
 	 			<box size=".5 .015 .125"/>
+      </geometry>
+    </collision>
+
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 -0.0725"/>
+      <geometry>
+        <box size=".35 .35 .02"/>
       </geometry>
     </collision>
   </link>

@@ -100,7 +100,8 @@ def launch_rlg_hydra(cfg: DictConfig):
     import isaacgymenvs
 
     from cpd.dagger_continuous import DAggerAgent
-    from cpd.network import actor_network_builder, pointcloud_actor_network_builder
+    from cpd.network import actor_network_builder
+    from cpd.network import pointcloud_actor_network_builder
     from cpd.dictobs_player import PpoDictObsPlayerContinuous
 
 
@@ -189,16 +190,16 @@ def launch_rlg_hydra(cfg: DictConfig):
     # register new AMP network builder and agent
     def build_runner(algo_observer):
         runner = Runner(algo_observer)
-        runner.algo_factory.register_builder('amp_continuous', lambda **kwargs : amp_continuous.AMPAgent(**kwargs))
-        runner.player_factory.register_builder('amp_continuous', lambda **kwargs : amp_players.AMPPlayerContinuous(**kwargs))
-        model_builder.register_model('continuous_amp', lambda network, **kwargs : amp_models.ModelAMPContinuous(network))
-        model_builder.register_network('amp', lambda **kwargs : amp_network_builder.AMPBuilder())
+        runner.algo_factory.register_builder('amp_continuous', lambda **kwargs: amp_continuous.AMPAgent(**kwargs))
+        runner.player_factory.register_builder('amp_continuous', lambda **kwargs: amp_players.AMPPlayerContinuous(**kwargs))
+        model_builder.register_model('continuous_amp', lambda network, **kwargs: amp_models.ModelAMPContinuous(network))
+        model_builder.register_network('amp', lambda **kwargs: amp_network_builder.AMPBuilder())
 
-        model_builder.register_network('actor', lambda **kwargs : actor_network_builder.ActorBuilder(**kwargs))
-        model_builder.register_network('pointcloud_actor', lambda **kwargs : pointcloud_actor_network_builder.PointcloudActorBuilder(**kwargs))
+        model_builder.register_network('actor', lambda **kwargs: actor_network_builder.ActorBuilder(**kwargs))
+        model_builder.register_network('pointcloud_actor', lambda **kwargs: pointcloud_actor_network_builder.PointcloudActorBuilder(**kwargs))
 
-        runner.algo_factory.register_builder('dagger_continuous', lambda **kwargs : DAggerAgent(**kwargs))
-        runner.player_factory.register_builder('dagger_continuous', lambda **kwargs : PpoDictObsPlayerContinuous(**kwargs))
+        runner.algo_factory.register_builder('dagger_continuous', lambda **kwargs: DAggerAgent(**kwargs))
+        runner.player_factory.register_builder('dagger_continuous', lambda **kwargs: PpoDictObsPlayerContinuous(**kwargs))
 
         return runner
 

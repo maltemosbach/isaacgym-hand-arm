@@ -1,0 +1,88 @@
+
+        <?xml version="1.0"?>
+        <robot name="table_with_hole">
+
+          <!-- Links -->
+          <link name="base_link"/>
+
+          <link name="front_wall">
+                <visual>
+                <geometry>
+                    <box size="0.12500000000000003 1.1 0.5"/>
+                </geometry>
+                </visual>
+                <collision>
+                <geometry>
+                    <box size="0.12500000000000003 1.1 0.5"/>
+                </geometry>
+                </collision>
+            </link>
+
+            <link name="back_wall">
+                <visual>
+                    <geometry>
+                        <box size="0.125 1.1 0.5"/>
+                    </geometry>
+                </visual>
+                <collision>
+                    <geometry>
+                        <box size="0.125 1.1 0.5"/>
+                    </geometry>
+                </collision>
+            </link>
+
+            <link name="right_wall">
+                <visual>
+                <geometry>
+                    <box size="0.75 0.45000000000000007 0.5"/>
+                </geometry>
+                </visual>
+                <collision>
+                    <geometry>
+                        <box size="0.75 0.45000000000000007 0.5"/>
+                    </geometry>
+                </collision>
+            </link>
+
+            <link name="left_wall">
+                <visual>
+                <geometry>
+                    <box size="0.75 0.15000000000000002 0.5"/>
+                </geometry>
+                </visual>
+                <collision>
+                    <geometry>
+                        <box size="0.75 0.15000000000000002 0.5"/>
+                    </geometry>
+                </collision>
+            </link>
+
+
+          <!-- Joints -->
+          <joint name="right_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="front_wall"/>
+            <origin xyz="-0.03249999999999999 0.38 0" rpy="0 0 0"/>
+          </joint>
+          
+          <joint name="left_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="back_wall"/>
+            <origin xyz="0.5925 0.38 0" rpy="0 0 0"/>
+          </joint>
+          
+          <joint name="front_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="right_wall"/>
+            <origin xyz="0.28 0.05500000000000002 0" rpy="0 0 0"/>
+          </joint>
+          
+          <joint name="back_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="left_wall"/>
+            <origin xyz="0.28 0.855 0" rpy="0 0 0"/>
+          </joint>
+
+
+        </robot>
+        

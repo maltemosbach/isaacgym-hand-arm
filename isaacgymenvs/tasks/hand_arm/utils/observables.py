@@ -8,7 +8,7 @@ from typing import Callable, Sequence, Optional, Union
 from isaacgymenvs.tasks.hand_arm.utils.visualization import *
 from isaacgymenvs.tasks.hand_arm.utils.callbacks import  CameraCallback, ObservableCallback
 from isaacgymenvs.tasks.hand_arm.utils.camera import ImageType, CameraSensor
-from isaacgymenvs.tasks.hand_arm.utils.transforms import Transform, ToVector
+from isaacgymenvs.tasks.hand_arm.utils.transforms import Transform, ToVector, FlattenPointcloud
 
 
 class Observable(ABC):
@@ -160,12 +160,36 @@ class ColorObservable(CameraObservable):
         super().__init__(name, camera_sensor, lambda: camera_sensor.current_sensor_observation[ImageType.COLOR], (camera_sensor.height, camera_sensor.width, 3), transform, CameraCallback(post_step_inside_gpu_access=camera_sensor.refresh_color), required, requires, partial(visualize_color_image, get_color_image=lambda: camera_sensor.current_sensor_observation[ImageType.COLOR], window_name=name))
 
 
-class PointcloudObservable(CameraObservable):
+class DepthObservable(CameraObservable):
     def __init__(
         self,
         name: str,
         camera_sensor: CameraSensor,
         transform: Optional[Transform] = None,
+        required: bool = False,
+        requires: Optional[Sequence[str]] = None,
+    ) -> None:
+        super().__init__(name, camera_sensor, lambda: camera_sensor.current_sensor_observation[ImageType.DEPTH], (camera_sensor.height, camera_sensor.width), transform, CameraCallback(post_step_inside_gpu_access=camera_sensor.refresh_depth), required, requires, partial(visualize_depth_image, get_depth_image=lambda: camera_sensor.current_sensor_observation[ImageType.DEPTH], window_name=name))
+
+
+class SegmenationObservable(CameraObservable):
+    def __init__(
+        self,
+        name: str,
+        camera_sensor: CameraSensor,
+        transform: Optional[Transform] = None,
+        required: bool = False,
+        requires: Optional[Sequence[str]] = None,
+    ) -> None:
+        super().__init__(name, camera_sensor, lambda: camera_sensor.current_sensor_observation[ImageType.SEGMENTATION], (camera_sensor.height, camera_sensor.width), transform, CameraCallback(post_step_inside_gpu_access=camera_sensor.refresh_segmentation), required, requires, partial(visualize_segmentation_image, get_segmentation_image=lambda: camera_sensor.current_sensor_observation[ImageType.SEGMENTATION], window_name=name))
+
+
+class PointcloudObservable(CameraObservable):
+    def __init__(
+        self,
+        name: str,
+        camera_sensor: CameraSensor,
+        transform: Optional[Transform] = FlattenPointcloud(),
         required: bool = False,
         requires: Optional[Sequence[str]] = None,
     ) -> None:
@@ -178,12 +202,12 @@ class SyntheticPointcloudObservable(Observable):
         name: str,
         get_state: Callable[[], torch.Tensor],
         size: Union[int, Sequence[int]],
-        transform: Optional[Transform] = None,
+        transform: Optional[Transform] = FlattenPointcloud(),
         callback: CameraCallback = CameraCallback(),
         required: bool = False,
         requires: Optional[Sequence[str]] = None,
     ) -> None:
-        super().__init__(name, get_state, size, name, transform, callback, required, requires, partial(visualize_pos, get_pos=get_state, marker="sphere", size=0.005))  # Pass name as observation_key to store synthetic pointcloud in observation dictionary.
+        super().__init__(name, get_state, size, name, transform, callback, required, requires, partial(visualize_pos, get_pos=get_state, marker="sphere", size=0.0025))  # Pass name as observation_key to store synthetic pointcloud in observation dictionary.
 
         if not name.endswith("_pointcloud"):
             raise ValueError(f"Synthetic pointcloud observables must end with '_pointcloud', but got {self.name}.")

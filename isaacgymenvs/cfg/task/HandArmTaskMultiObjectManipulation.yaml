@@ -25,11 +25,22 @@ env:
     object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box' ]
     task_observations: ['fingertip_to_target_object_pos',  'target_object_to_goal_pos']
 
-    observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'target_object_pos_initial', 'target_object_synthetic-pointcloud', 'robot_synthetic-pointcloud'] #'target_object_synthetic-pointcloud', 'scene_synthetic-pointcloud'] #'topview-pointcloud', "topview_target_object-pointcloud"]
+    # Privileged teacher to synthetic visual student.
+    #observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'target_object_pos_initial', 'target_object_synthetic-pointcloud', 'robot_synthetic-pointcloud'] #'target_object_synthetic-pointcloud', 'scene_synthetic-pointcloud'] #'topview-pointcloud', "topview_target_object-pointcloud"]
 
-    #observations: ["actuated_dof_pos", "actuated_dof_vel", "fingertip_pos", "fingertip_quat", "object_pos", "object_bounding_box", "target_object_bounding_box", "fingertip_to_target_object_pos", "target_object_to_goal_pos"]
+    # Privileged teacher to privileged history-aware student.
+    #observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'target_object_pos_initial', 'object_pos', 'object_bounding_box'] #'target_object_synthetic-pointcloud', 'scene_synthetic-pointcloud'] #'topview-pointcloud', "topview_target_object-pointcloud"]
+    
+    # Distill to visual history-aware student.
+    #observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'target_object_pos_initial', 'target_object_synthetic_initial-pointcloud', 'object_synthetic-pointcloud', 'robot_synthetic-pointcloud']
 
-    teacher_observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
+    # Distill to visual history-aware student from real camera.
+    #observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'fingertip_pos', 'fingertip_quat', 'goal_pos', 'topview_sam_pos_initial', 'topview_sam_initial-pointcloud', 'topview-pointcloud']
+
+    # Harder proprioceptive observations.
+    #observations: ['arm_dof_pos', 'arm_dof_vel', 'actuated_dof_targets', 'eef_pos', 'eef_quat', 'fingertip_pos', 'target_object_pos', 'goal_pos', 'object_synthetic-pointcloud', 'target_object_synthetic_initial-pointcloud', 'robot_synthetic-pointcloud', 'workspace_synthetic-pointcloud', 'table_synthetic-pointcloud'] #'target_object_synthetic-pointcloud', 'scene_synthetic-pointcloud'] #'topview-pointcloud', "topview_target_object-pointcloud"]
+
+    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
 
 rl:
     # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
@@ -65,3 +76,9 @@ rl:
     reset:
         max_episode_length: 200
         reset_reached_goal: False
+
+    randomize: True
+    randomization_params:
+        object_disturbance:
+            probability: 0.2
+            magnitude: 15.0

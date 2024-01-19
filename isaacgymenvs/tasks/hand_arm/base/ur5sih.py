@@ -4,10 +4,10 @@ from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.gymtorch import *
 from isaacgymenvs.tasks.hand_arm.base.configurable_vec_task import ConfigurableVecTask
 from isaacgymenvs.tasks.hand_arm.utils.actionables import Actionable
-from isaacgymenvs.tasks.hand_arm.utils.observables import LowDimObservable, PosObservable, PoseObservable
+from isaacgymenvs.tasks.hand_arm.utils.observables import LowDimObservable, PosObservable, PoseObservable, SyntheticPointcloudObservable
 from isaacgymenvs.tasks.hand_arm.utils.callbacks import  ActionableCallback, ObservableCallback
 
-from isaacgym.torch_utils import scale, to_torch, quat_mul, quat_conjugate
+from isaacgym.torch_utils import scale, to_torch, quat_mul, quat_conjugate, quat_apply
 import matplotlib
 from typing import *
 import torch
@@ -19,7 +19,7 @@ from functools import partial
 
 import rospy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Int32MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
 import actionlib
 from control_msgs.msg import \
@@ -27,6 +27,8 @@ from control_msgs.msg import \
     FollowJointTrajectoryGoal
 import tf
 import tabulate
+import numpy as np
+import trimesh
 
 
 class Ur5Sih(ConfigurableVecTask):
@@ -68,6 +70,26 @@ class Ur5Sih(ConfigurableVecTask):
         self.ur5sih_body_meshes = {name: link.collision_mesh for name, link in zip(self.ur5sih_body_names, self._urdf_robot.links) if link.collision_mesh}
         self.ur5sih_body_areas = {name: link.collision_mesh.area for name, link in zip(self.ur5sih_body_names, self._urdf_robot.links) if link.collision_mesh}
 
+        use_reduced_robot = True
+        if use_reduced_robot:
+            self.ur5sih_body_areas.pop("shoulder_link")
+            self.ur5sih_body_areas.pop("upper_arm_link")
+            self.ur5sih_body_areas.pop("forearm_link")
+            self.ur5sih_body_areas.pop("wrist_1_link")
+            self.ur5sih_body_areas.pop("wrist_2_link")
+            self.ur5sih_body_areas.pop("wrist_3_link")
+            #self.body_areas.pop("palm")
+            self.ur5sih_body_meshes.pop("shoulder_link")
+            self.ur5sih_body_meshes.pop("upper_arm_link")
+            self.ur5sih_body_meshes.pop("forearm_link")
+            self.ur5sih_body_meshes.pop("wrist_1_link")
+            self.ur5sih_body_meshes.pop("wrist_2_link")
+            self.ur5sih_body_meshes.pop("wrist_3_link")
+            #self.body_meshes.pop("palm")
+
+        density = 1500.0  # Number of samples per square meter.
+        self.ur5sih_num_body_surface_samples = [int(density * area) for area in self.ur5sih_body_areas.values()]
+
     def _acquire_robot_asset(self, rootpath: str, filename: str) -> None:
         robot_asset = self.gym.load_asset(self.sim, rootpath, filename, self.robot_asset_options)
 
@@ -100,7 +122,7 @@ class Ur5Sih(ConfigurableVecTask):
 
     def create_robot_actor(self, env_ptr, env_index, disable_self_collisions: bool, segmentation_id: int = 1):
         collision_filter = 0b1 if disable_self_collisions else 0b0
-        actor_handle = self.gym.create_actor(env_ptr, self.ur5sih_asset, gymapi.Transform(), 'robot', env_index, collision_filter, segmentation_id)
+        actor_handle = self.gym.create_actor(env_ptr, self.ur5sih_asset, gymapi.Transform(p=gymapi.Vec3(0., 0., self.cfg_env.table_height)), 'robot', env_index, collision_filter, segmentation_id)
         self.gym.set_actor_dof_properties(env_ptr, actor_handle, self.ur5sih_dof_props)
         return actor_handle
 
@@ -156,11 +178,6 @@ class Ur5Sih(ConfigurableVecTask):
         asset_options.angular_damping = 0.01
         asset_options.linear_damping = 0.01
         return asset_options
-    
-    def actuated_dofs_to_all_dofs(self, actuated_angles: torch.Tensor) -> torch.Tensor:
-        batch_size, num_actuated_dofs = actuated_angles.shape
-        assert num_actuated_dofs == self.actuated_dof_count
-        return torch.matmul(actuated_angles, self.mimic_multiplier.t()) + self.mimic_offset.expand(batch_size, -1)
 
     def register_actionables(self) -> None:
         super().register_actionables()
@@ -305,6 +322,56 @@ class Ur5Sih(ConfigurableVecTask):
                 required=True
             )
         )
+
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="ur5sih_synthetic_pointcloud",  # Pointcloud sampled on the surface of the UR5-SIH robot.
+                size=(sum(self.ur5sih_num_body_surface_samples), 4,),
+                get_state=lambda: self.ur5sih_synthetic_pointcloud,
+                callback=ObservableCallback(
+                    post_init=self._acquire_ur5sih_synthetic_pointcloud,
+                    post_step=self._refresh_ur5sih_synthetic_pointcloud,
+                )
+            )
+        )
+        fingertip_semantic_id = 3
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="sih_fingertip_pointcloud",  # Fingertip positions as pointcloud.
+                size=(5, 4,),
+                get_state=lambda: torch.cat([self.sih_fingertip_pos, fingertip_semantic_id * torch.ones_like(self.sih_fingertip_pos[:, :, 0:1])], dim=-1),
+                requires=["sih_fingertip_pos"]
+            )
+        )
+
+    def _acquire_ur5sih_synthetic_pointcloud(self) -> None:
+        self.ur5sih_body_env_indices = [self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.ur5sih_handles[0], body_name, gymapi.DOMAIN_ENV) for body_name in self.ur5sih_body_areas.keys()]
+        self.ur5sih_body_pos = self.body_pos[:, self.ur5sih_body_env_indices, 0:3]
+        self.ur5sih_body_quat = self.body_quat[:, self.ur5sih_body_env_indices, 0:4]
+
+        self.ur5sih_surface_samples = []
+        for body_index, body_mesh in enumerate(self.ur5sih_body_meshes.values()):
+            current_body_surface_samples = np.array(trimesh.sample.sample_surface(body_mesh, count=self.ur5sih_num_body_surface_samples[body_index])[0]).astype(float)
+            current_body_surface_samples = torch.from_numpy(current_body_surface_samples).to(self.device, dtype=torch.float32)
+            self.ur5sih_surface_samples.append(current_body_surface_samples.unsqueeze(0).repeat(self.num_envs, 1, 1))
+
+        self.ur5sih_synthetic_pointcloud = torch.zeros((self.num_envs, sum(self.ur5sih_num_body_surface_samples), 4)).to(self.device)  # shape: (num_envs, num_robot_points, 4)
+        self.ur5sih_synthetic_pointcloud[:, :, 3] = 1
+
+    def _refresh_ur5sih_synthetic_pointcloud(self, relative: bool = False) -> None:
+        # Refresh UR5-SIH body poses.
+        self.ur5sih_body_pos[:] = self.body_pos[:, self.ur5sih_body_env_indices, 0:3]
+        self.ur5sih_body_quat[:] = self.body_quat[:, self.ur5sih_body_env_indices, 0:4]
+
+        prev_index = 0
+        for body_index, num_samples in enumerate(self.ur5sih_num_body_surface_samples):
+            self.ur5sih_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3] = self.ur5sih_body_pos[:, body_index].unsqueeze(1).repeat(1, num_samples, 1) + quat_apply(self.ur5sih_body_quat[:, body_index].unsqueeze(1).repeat(1, num_samples, 1), self.ur5sih_surface_samples[body_index])
+
+            if relative:
+                self.ur5sih_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3] -= self.ur5_flange_pose[:, 0:3].unsqueeze(1).repeat(1, num_samples, 1)
+                self.ur5sih_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3] = quat_apply(quat_conjugate(self.ur5_flange_pose[:, 3:7]).unsqueeze(1).repeat(1, num_samples, 1), self.ur5sih_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3])
+
+            prev_index += num_samples
     
     def _init_ur5_joint_pos_controller(self) -> None:
         self.ur5_joint_pos_target = torch.zeros((self.num_envs, 6), device=self.device)
@@ -340,11 +407,14 @@ class Ur5Sih(ConfigurableVecTask):
         if self.cfg_base.ros.activate:
             self._publish_ur5_joint_pos_controller(secs=0, nsecs=int(self.dt * 1e9))
              
-    def _publish_ur5_joint_pos_controller(self, secs: int, nsecs: int, verbose: bool = False) -> None:
+    def _publish_ur5_joint_pos_controller(self, secs: int, nsecs: int, use_targets: bool = False, verbose: bool = False) -> None:
         self.ur5_joint_trajectory_client.cancel_all_goals()
 
         position_target_point = JointTrajectoryPoint()
-        position_target_point.positions = self.ur5_joint_pos_target[0].cpu().numpy()
+        if use_targets:
+            position_target_point.positions = self.ur5_joint_pos_target[0].cpu().numpy()
+        else:
+            position_target_point.positions = self.dof_pos[0, :6].cpu().numpy()
         position_target_point.time_from_start.secs = secs
         position_target_point.time_from_start.nsecs = nsecs
 
@@ -356,13 +426,13 @@ class Ur5Sih(ConfigurableVecTask):
         joint_trajectory_msg.trajectory.points.append(position_target_point)
 
         self.ur5_joint_trajectory_client.send_goal(joint_trajectory_msg)
-        goal_status = self.joint_trajectory_client.get_state()
+        goal_status = self.ur5_joint_trajectory_client.get_state()
 
         if verbose:
-            print(f"Trajectory goal {self.goal_status_text[goal_status]}.")
+            print(f"Trajectory goal {self.ur5_goal_status_text[goal_status]}.")
       
         if goal_status > 3:
-            raise RuntimeError(f"Trajectory goal {self.goal_status_text[goal_status]}.")
+            raise RuntimeError(f"Trajectory goal {self.ur5_goal_status_text[goal_status]}.")
 
     def _init_sih_servo_pos_controller(self) -> None:
         self.sih_servo_commands = torch.zeros((self.num_envs, 5), device=self.device)
@@ -390,25 +460,27 @@ class Ur5Sih(ConfigurableVecTask):
 
         self.sih_smoothed_actions = torch.zeros((self.num_envs, 5), device=self.device)
 
-    def _reset_sih_servo_pos_controller(self, env_ids) -> None:
-        self.sih_servo_commands[env_ids] = self.sih_servo_commands_upper_limits  # Upper limits represent open hand with thumb facing downwards.
+        if self.cfg_base.ros.activate:
+            self.sih_ticks_command_publisher = rospy.Publisher("sih/ticks_command", Int32MultiArray, queue_size=1)
 
+    def _reset_sih_servo_pos_controller(self, env_ids) -> None:
+        last_commands = self.sih_servo_commands[env_ids].clone()
+        if self.cfg_base.ros.activate:
+            input("Press Enter to reset the SIH hand.")
+            for i in range(25):
+                self.sih_servo_commands[env_ids] = (i / 25) * self.sih_servo_commands_upper_limits + (1 - i / 25) * last_commands
+                self._publish_sih_servo_pos_controller()
+                time.sleep(0.1)
+            input("SIH hand reset. Press Enter to start episode.")
+
+        self.sih_servo_commands[env_ids] = self.sih_servo_commands_upper_limits  # Upper limits represent open hand with thumb facing downwards.
         self.dof_position_targets[env_ids, 6:] = 0.
         self.sih_smoothed_actions[env_ids] = 0.
 
-        if self.cfg_base.ros.activate:
-            input("Press Enter to reset the SIH hand.")
-            self._publish_sih_servo_pos_controller()
-            time.sleep(2)
-            input("SIH hand reset. Press Enter to start episode.")
-
     def _publish_sih_servo_pos_controller(self, verbose: bool = False) -> None:
-        joint_state_msg = JointState()
-        joint_state_msg.header = Header()
-        joint_state_msg.header.stamp = rospy.Time.now()
-        joint_state_msg.name = self.sih_joint_names
-        joint_state_msg.position = self.sih_joint_commmands[0].cpu().numpy()
-        self.sih_joint_target_publisher.publish(joint_state_msg)
+        ticks_command_msg = Int32MultiArray()
+        ticks_command_msg.data = self.sih_servo_commands[0].cpu().numpy().astype(int).tolist()
+        self.sih_ticks_command_publisher.publish(ticks_command_msg)
     
     def _step_sih_servo_pos_controller(self, actions: torch.Tensor, mode: str, alpha: float = 0.8) -> None:
         if mode == "absolute":
@@ -535,8 +607,8 @@ class Ur5Sih(ConfigurableVecTask):
             self.ur5_joint_state[:, 6:] = self.dof_vel[:, 0:6]
          
     def _init_sih_fingertip_indices(self) -> None:
-        if self.cfg_base.ros.activate:
-            raise ValueError("SIH fingertip observations not supported with ROS.")
+        #if self.cfg_base.ros.activate:
+        #    raise ValueError("SIH fingertip observations not supported with ROS.")
         
         sih_fingertip_body_names = ["thumb_fingertip", "index_fingertip", "middle_fingertip", "ring_fingertip", "little_fingertip"]
         self.sih_fingertip_body_env_indices = [self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.ur5sih_handles[0], n, gymapi.DOMAIN_ENV) for n in sih_fingertip_body_names]

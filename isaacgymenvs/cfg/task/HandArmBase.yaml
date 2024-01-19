@@ -27,7 +27,7 @@ debug:
     save_recordings: False
     write_frames_every: 'step'  # Options {'dt', 'step'}.
 
-  visualize: []
+  visualize: ['workspace_extent', 'bin_extent'] #['topview_sam_pos_initial', 'topview_sam_initial-pointcloud'] # ['workspace_extent', 'topview_target_object_initial-pointcloud', 'topview-rgb'] #['target_object_synthetic-pointcloud', 'robot_synthetic-pointcloud']
 
 logging:
   wandb:

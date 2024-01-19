@@ -429,6 +429,8 @@ class CameraMixin:
         else:
             assert False
 
+        print("refreshing images")
+
         
         if self.cfg_base.debug.camera.save_recordings:
             self._write_recordings()
@@ -445,6 +447,10 @@ class CameraMixin:
                 self._recordings_dict[camera_name] = {}
                 for image_type in camera_sensor.image_types:
                     self._recordings_dict[camera_name][image_type] = [[] for _ in range(self.num_envs)]
+
+        print("writing recodrings")
+        print("experiment_dir:", experiment_dir)
+        input()
 
         # Append current sensor observations to recordings dict.
         for camera_name, camera_sensor in self.camera_dict.items():

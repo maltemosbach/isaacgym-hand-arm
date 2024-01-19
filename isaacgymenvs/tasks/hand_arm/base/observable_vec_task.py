@@ -1,7 +1,10 @@
+import cv2
 from isaacgym import gymtorch
 from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.tasks.hand_arm.utils.camera import CameraSensor, IsaacGymCameraSensor, ROSCameraSensor, CameraSensorProperties, ImageType
-from isaacgymenvs.tasks.hand_arm.utils.observables import Observable, ActiveObservables, ColorObservable, PointcloudObservable
+from isaacgymenvs.tasks.hand_arm.utils.observables import Observable, ActiveObservables, ColorObservable, DepthObservable, SegmenationObservable, PointcloudObservable
+import numpy as np
+import os
 import torch
 from typing import Dict, List, Tuple, Optional
 
@@ -41,6 +44,9 @@ class ObservableVecTask(VecTask):
                 for observation_name in (self.cfg["env"]["observations"] + self.cfg["env"]["teacher_observations"] if "teacher_observations" in self.cfg["env"].keys() else self.cfg["env"]["observations"]):
                    if observation_name.startswith(camera_name):
                         image_types.append(observation_name.split("_")[-1])
+
+                        #if "target" in observation_name:
+                        #    image_types.append("segmentation")  # TODO: Buggyyy
 
                 if image_types:
                     self._camera_dict[camera_name] = self.create_camera_sensor(**camera_cfg, image_types=image_types)
@@ -84,19 +90,12 @@ class ObservableVecTask(VecTask):
                 for observation_name in self._sorted_observations:
                    if observation_name.startswith(camera_name):
                         image_types.append(observation_name.split("_")[-1])
-
-                if image_types:
-                    camera_dict[camera_name] = self.create_camera_sensor(**camera_cfg, image_types=image_types)
         return camera_dict
     
     def create_camera_sensor(
             self,
             image_types: List[str],
-            pos: Tuple[float, float, float] = (0, 0, 0),
-            quat: Tuple[float, float, float, float] = (0, 0, 0, 1),
-            model: Optional[str] = None,
-            fovx: Optional[int] = None,
-            resolution: Optional[Tuple[int, int]] = None
+            **kwargs
     ) -> None:
         if self.cfg_base.ros.activate:
             return ROSCameraSensor(image_types, **kwargs)
@@ -220,5 +219,58 @@ class ObservableVecTask(VecTask):
             # Call any other visualization functions (e.g. workspace extent, etc.).
             else:
                 getattr(self, "visualize_" + visualization)()
+
+    def _write_recordings(self) -> None:
+        # Initialize recordings dict.
+        if not hasattr(self, '_recordings_dict'):
+            self._recordings_dict = {}
+            self._episode_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+            experiment_dir = os.path.join('runs', self.cfg['full_experiment_name'])
+            self._recordings_dir = os.path.join(experiment_dir, 'videos')  # TODO: Align with new directory structure that includes a timestamp.
+            os.makedirs(self._recordings_dir, exist_ok=True)
+
+            for camera_name, camera_sensor in self._camera_dict.items():
+                self._recordings_dict[camera_name] = {}
+                for image_type in camera_sensor.image_types:
+                    self._recordings_dict[camera_name][image_type] = [[] for _ in range(self.num_envs)]
+
+        # Append current sensor observations to recordings dict.
+        for camera_name, camera_sensor in self._camera_dict.items():
+            for image_type in camera_sensor.image_types:
+                for env_index in range(self.num_envs):
+                    image_np = camera_sensor.current_sensor_observation[image_type][env_index].detach().cpu().numpy().copy()
+                    if image_type == ImageType.COLOR:
+                        self._recordings_dict[camera_name][image_type][env_index].append(image_np[..., ::-1])
+                    elif image_type == ImageType.DEPTH:
+                        depth_range = (0, 2.5)
+                        image_np = np.clip(-image_np, *depth_range)
+                        image_np = (image_np - depth_range[0]) / (depth_range[1] - depth_range[0])
+                        image_np = (np.stack([image_np] * 3, axis=-1) * 255).astype(np.uint8)
+                        self._recordings_dict[camera_name][image_type][env_index].append(image_np)
+
+                        # TODO: Implement generic depth and segmentation to RGB mappings as I have already used for the visualization functions.
+                    else:
+                        raise NotImplementedError
+
+        # Write recordings to file at the end of the episode.
+        fps = 1 / (self.cfg_base.sim.dt * self.cfg_task.env.controlFrequencyInv)
+        done_env_indices = self.reset_buf.nonzero(as_tuple=False).flatten()
+        if len(done_env_indices) > 0:
+            for done_env_index in done_env_indices:
+                self._episode_count[done_env_index] += 1
+                for camera_name, camera_sensor in self._camera_dict.items():
+                    for image_type in camera_sensor.image_types:
+                        video_writer = cv2.VideoWriter(
+                            os.path.join(
+                                self._recordings_dir,
+                                f"{camera_name}_{image_type}_env_{done_env_index}_episode_{self._episode_count[done_env_index]}.mp4"
+                            ),
+                            cv2.VideoWriter_fourcc(*'mp4v'), fps, (camera_sensor.width, camera_sensor.height)
+                        )
+                        for image_np in self._recordings_dict[camera_name][image_type][done_env_index]:
+                            video_writer.write(image_np)
+                        video_writer.release()
+
+                        self._recordings_dict[camera_name][image_type][done_env_index] = []
 
     

@@ -414,7 +414,7 @@
   </link>
   <link name="thumb_fingertip"/>
 
-  <joint name="palm_to_th_proximal" type="revolute">
+  <joint name="thumb_opposition" type="revolute">
     <parent link="palm"/>
     <child link="th_proximal"/>
     <origin xyz="-0.034 0.019 0.08"/>
@@ -422,7 +422,7 @@
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
   </joint>
-  <joint name="th_proximal_to_th_inter" type="revolute">
+  <joint name="thumb_flexion" type="revolute">
     <parent link="th_proximal"/>
     <child link="th_inter"/>
     <origin xyz="-0.024 0.005 0.001"/>
@@ -437,7 +437,7 @@
     <axis xyz="0 1 0"/>
     <limit effort="0.75" lower="0.0" upper="1.571" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="th_proximal_to_th_inter" multiplier="1.0"/>
+    <mimic joint="thumb_flexion" multiplier="1.0"/>
   </joint>
   <joint name="th_distal_to_thumb_fingertip" type="fixed">
     <parent link="th_distal"/>
@@ -476,7 +476,7 @@
   </link>
   <link name="index_fingertip"/>
 
-  <joint name="palm_to_if_proximal" type="revolute">
+  <joint name="index_finger" type="revolute">
     <parent link="palm"/>
     <child link="if_proximal"/>
     <origin xyz="0.0435 0 0.141"/>
@@ -491,7 +491,7 @@
     <axis xyz="1 0 0"/>
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="palm_to_if_proximal" multiplier="1.0"/>
+    <mimic joint="index_finger" multiplier="1.0"/>
   </joint>
   <joint name="if_distal_to_index_fingertip" type="fixed">
     <parent link="if_distal"/>
@@ -531,7 +531,7 @@
   </link>
   <link name="middle_fingertip"/>
 
-  <joint name="palm_to_mf_proximal" type="revolute">
+  <joint name="middle_finger" type="revolute">
     <parent link="palm"/>
     <child link="mf_proximal"/>
     <origin xyz="0.0187 0 0.141"/>
@@ -546,7 +546,7 @@
     <axis xyz="1 0 0"/>
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="palm_to_mf_proximal" multiplier="1.0"/>
+    <mimic joint="middle_finger" multiplier="1.0"/>
   </joint>
   <joint name="mf_distal_to_middle_fingertip" type="fixed">
     <parent link="mf_distal"/>
@@ -585,7 +585,7 @@
   </link>
   <link name="ring_fingertip"/>
 
-  <joint name="palm_to_rf_proximal" type="revolute">
+  <joint name="ring_finger" type="revolute">
     <parent link="palm"/>
     <child link="rf_proximal"/>
     <origin xyz="-0.0069 0 0.134"/>
@@ -600,7 +600,7 @@
     <axis xyz="1 0 0"/>
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="palm_to_rf_proximal" multiplier="1.0"/>
+    <mimic joint="ring_finger" multiplier="1.0"/>
   </joint>
   <joint name="rf_distal_to_ring_fingertip" type="fixed">
     <parent link="rf_distal"/>
@@ -646,7 +646,7 @@
     <axis xyz="1 0 0"/>
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="palm_to_rf_proximal" multiplier="1.0"/>
+    <mimic joint="ring_finger" multiplier="1.0"/>
   </joint>
   <joint name="lf_proximal_to_lf_distal" type="revolute">
     <parent link="lf_proximal"/>
@@ -655,7 +655,7 @@
     <axis xyz="1 0 0"/>
     <limit effort="0.75" lower="-1.571" upper="0.0" velocity="2.09439510239"/>
     <dynamics damping="0.1" friction="0"/>
-    <mimic joint="palm_to_rf_proximal" multiplier="1.0"/>
+    <mimic joint="ring_finger" multiplier="1.0"/>
   </joint>
   <joint name="lf_distal_to_little_fingertip" type="fixed">
     <parent link="lf_distal"/>
@@ -669,7 +669,7 @@
     <actuator name="thumb_opposition">
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
-    <joint name="palm_to_th_proximal">
+    <joint name="thumb_opposition">
       <hardwareInterface>PositionJointInterface</hardwareInterface>
     </joint>
   </transmission>
@@ -679,7 +679,7 @@
     <actuator name="thumb_flexion">
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
-    <joint name="th_proximal_to_th_inter">
+    <joint name="thumb_flexion">
       <hardwareInterface>PositionJointInterface</hardwareInterface>
     </joint>
   </transmission>
@@ -689,7 +689,7 @@
     <actuator name="index_finger">
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
-    <joint name="palm_to_if_proximal">
+    <joint name="index_finger">
       <hardwareInterface>PositionJointInterface</hardwareInterface>
     </joint>
   </transmission>
@@ -699,7 +699,7 @@
     <actuator name="middle_finger">
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
-    <joint name="palm_to_mf_proximal">
+    <joint name="middle_finger">
       <hardwareInterface>PositionJointInterface</hardwareInterface>
     </joint>
   </transmission>
@@ -709,7 +709,7 @@
     <actuator name="ring_finger">
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
-    <joint name="palm_to_rf_proximal">
+    <joint name="ring_finger">
       <hardwareInterface>PositionJointInterface</hardwareInterface>
     </joint>
   </transmission>

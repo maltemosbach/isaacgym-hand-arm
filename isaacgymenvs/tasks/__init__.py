@@ -57,7 +57,10 @@ from .industreal.industreal_task_pegs_insert import IndustRealTaskPegsInsert
 from .industreal.industreal_task_gears_insert import IndustRealTaskGearsInsert
 
 
-from .hand_arm.task.multi_object_manipulation import HandArmTaskMultiObjectManipulation
+#from .hand_arm_old.task.multi_object_manipulation import HandArmTaskMultiObjectManipulation
+
+from .hand_arm.task.multi_object_manipulation import Ur5SihMultiObjectManipulation
+from .hand_arm.task.stretch_multi_object_manipulation import StretchMultiObjectManipulation
 
 
 def resolve_allegro_kuka(cfg, *args, **kwargs):
@@ -111,8 +114,10 @@ isaacgym_task_map = {
     "Humanoid": Humanoid,
     "HumanoidAMP": HumanoidAMP,
     "Ingenuity": Ingenuity,
-    "HandArmMultiObjectManipulation": HandArmTaskMultiObjectManipulation,
+    #"HandArmMultiObjectManipulation": HandArmTaskMultiObjectManipulation,
     "Quadcopter": Quadcopter,
     "ShadowHand": ShadowHand,
+    "StretchMultiObjectManipulation": StretchMultiObjectManipulation,
     "Trifinger": Trifinger,
+    "Ur5SihMultiObjectManipulation": Ur5SihMultiObjectManipulation,
 }

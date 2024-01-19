@@ -1,9 +1,10 @@
 
 from isaacgym import gymapi, gymutil
 from isaacgymenvs.tasks.hand_arm.base.ur5sih import Ur5Sih
-from isaacgymenvs.tasks.hand_arm.utils.camera import PointType
+from isaacgymenvs.tasks.hand_arm.utils.camera import PointType, ImageType
 from isaacgymenvs.tasks.hand_arm.utils.observables import Observable, LowDimObservable, PosObservable, PoseObservable, BoundingBoxObservable, SyntheticPointcloudObservable
 from isaacgymenvs.tasks.hand_arm.utils.callbacks import ObservableCallback
+from isaacgymenvs. tasks.hand_arm.utils.urdf import generate_table_with_hole
 import hydra
 from omegaconf import DictConfig
 import numpy as np
@@ -17,8 +18,8 @@ import torch
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 
-from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate
-
+from isaacgym.torch_utils import quat_apply, quat_mul, quat_rotate, quat_conjugate
+from functools import partial
 
 
 class ObjectAsset:
@@ -262,7 +263,7 @@ class Ur5SihMultiObject(Ur5Sih):
         self.register_observable(
             SyntheticPointcloudObservable(
                 name="object_synthetic_pointcloud",
-                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4),
+                size=(self.cfg_env.objects.num_objects * self.cfg_env.pointclouds.max_num_points, 4),
                 get_state=lambda: self.object_synthetic_pointcloud,
                 callback=ObservableCallback(
                     post_init=self._acquire_object_synthetic_pointcloud,
@@ -285,7 +286,7 @@ class Ur5SihMultiObject(Ur5Sih):
         self.register_observable(
             SyntheticPointcloudObservable(
                 name="object_synthetic_initial_pointcloud",
-                size=(self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4),
+                size=(self.cfg_env.objects.num_objects * self.cfg_env.pointclouds.max_num_points, 4),
                 get_state=lambda: self.object_synthetic_initial_pointcloud,
                 callback=ObservableCallback(
                     post_init=lambda: setattr(self, "object_synthetic_initial_pointcloud", torch.zeros((self.num_envs, self.cfg_env.objects.drop.num_initial_poses, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),  # NOTE: Initial object observations are overwritten automatically once after the objects have been dropped.
@@ -319,7 +320,7 @@ class Ur5SihMultiObject(Ur5Sih):
             )
         )
 
-        # Register task-specific observables (observations that make desired bahaviors easier to learn).
+        # Register task-specific observables (observations that make desired behaviors easier to learn).
         self.register_observable(
             LowDimObservable(
                 name="sih_fingertip_to_target_object_pos",
@@ -345,15 +346,67 @@ class Ur5SihMultiObject(Ur5Sih):
             )
         )
 
+        workspace_pointcloud_size=64
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="workspace_synthetic_pointcloud",
+                size=(workspace_pointcloud_size, 4),
+                get_state=lambda: self.workspace_synthetic_pointcloud,
+                callback=ObservableCallback(
+                    post_init=lambda: self._acquire_workspace_synthetic_pointcloud(num_samples=workspace_pointcloud_size),
+                ),
+            )
+        )
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="goal_synthetic_pointcloud",
+                size=(1, 4),
+                get_state=lambda: torch.cat([self.goal_pos.unsqueeze(1), PointType.GOAL.value * torch.ones((self.num_envs, 1, 1), device=self.device)], dim=-1),
+                requires=["goal_pos"],
+            )
+        )
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="relative_goal_synthetic_pointcloud",
+                size=(1, 4),
+                get_state=lambda: torch.cat([(self.relative_goal_pos).unsqueeze(1), PointType.GOAL.value * torch.ones((self.num_envs, 1, 1), device=self.device)], dim=-1),
+                requires=["goal_pos"],
+                callback=ObservableCallback(
+                    post_init=lambda: setattr(self, "relative_goal_pos", torch.zeros((self.num_envs, 3), device=self.device)),
+                    post_step=self._refresh_relative_goal_synthetic_pointcloud,
+                )
+            )
+        )
+
+        # Register camera observations that relate to the objects.
+        for camera_name in self.cfg_env.cameras:
+            self.register_observable(
+                SyntheticPointcloudObservable(
+                    name=f"{camera_name}_target_object_pointcloud",
+                    size=(self.cfg_env.pointclouds.max_num_points, 4),
+                    get_state=partial(getattr, self, f"{camera_name}_target_object_pointcloud"),
+                    callback=ObservableCallback(
+                        post_init=lambda camera_name=camera_name: setattr(self, f"{camera_name}_target_object_pointcloud", torch.zeros((self.num_envs, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)),
+                        post_step=lambda camera_name=camera_name: self._refresh_segmented_pointcloud(camera_name=camera_name, tensor_name="_target_object_pointcloud", target_segmentation_id=self.target_object_index + 3, pointcloud_id=PointType.TARGET.value),
+                    ),
+                    requires=[f"{camera_name}_pointcloud", f"{camera_name}_segmentation"]
+                )
+            )
+
     def _acquire_env_cfg(self) -> DictConfig:
         cfg_env = hydra.compose(config_name=self._env_cfg_path)['task']
         
         if cfg_env.bin.asset == 'no_bin':
-            self.bin_info = {"extent": [[-0.25, -0.25, 0.0], [0.25, 0.25, 0.2]]}
+            self.bin_info = {"extent": [[-0.25, -0.25, cfg_env.table_height], [0.25, 0.25, cfg_env.table_height + 0.2]]}
         else:
             bin_info_path = f'../../assets/hand_arm/{cfg_env.bin.asset}/bin_info.yaml'
             self.bin_info = hydra.compose(config_name=bin_info_path)
             self.bin_info = self.bin_info['']['']['']['']['']['']['assets']['hand_arm'][cfg_env.bin.asset]
+            self.bin_info["extent"][0][2] += cfg_env.table_height
+            self.bin_info["extent"][1][2] += cfg_env.table_height
+
+        self.workspace = torch.tensor(cfg_env.workspace)
+        self.workspace[:, 2] += cfg_env.table_height
 
         if self.cfg_task.rl.goal == "throw":
             self.goal_bin_half_extent = torch.Tensor([0.1, 0.1, 0.1])
@@ -426,14 +479,16 @@ class Ur5SihMultiObject(Ur5Sih):
             bin_options.vhacd_params = gymapi.VhacdParams()
             bin_options.vhacd_params.resolution = 1000000
             bin_asset = self.gym.load_asset(self.sim, '../assets/hand_arm/', self.cfg_env.bin.asset + '/bin.urdf', bin_options)
-            bin_pose = gymapi.Transform(p=gymapi.Vec3(*self.cfg_env.bin.pos), r=gymapi.Quat(*self.cfg_env.bin.quat))
+            bin_pos = gymapi.Vec3(*self.cfg_env.bin.pos)
+            bin_pos.z += self.cfg_env.table_height
+            bin_pose = gymapi.Transform(p=bin_pos, r=gymapi.Quat(*self.cfg_env.bin.quat))
             bin_rigid_body_count = self.gym.get_asset_rigid_body_count(bin_asset)
             bin_rigid_shape_count = self.gym.get_asset_rigid_shape_count(bin_asset)
 
         if self.cfg_task.rl.goal == "reposition":
             goal_options = gymapi.AssetOptions()
             goal_options.fix_base_link = True
-            goal_asset = self.gym.create_sphere(self.sim, 0.0, goal_options)
+            goal_asset = self.gym.create_sphere(self.sim, 0.02, goal_options)
             goal_rigid_body_count = self.gym.get_asset_rigid_body_count(goal_asset)
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
 
@@ -449,6 +504,22 @@ class Ur5SihMultiObject(Ur5Sih):
             goal_rigid_shape_count = self.gym.get_asset_rigid_shape_count(goal_asset)
         else:
             assert False
+
+        if self.cfg_env.table_height > 0.0:
+            table_options = gymapi.AssetOptions()
+            table_options.fix_base_link = True
+
+            if self.cfg_env.bin.asset == 'no_bin':
+                table_asset = self.gym.create_box(self.sim, 0.75, 1.1, self.cfg_env.table_height, table_options)
+
+            else:
+                generate_table_with_hole(x_range=(-0.095, 0.655), y_range=(-0.17, 0.93), hole_x_range=(self.bin_info['extent'][0][0] + self.cfg_env.bin.pos[0], self.bin_info['extent'][1][0] + self.cfg_env.bin.pos[0]), hole_y_range=(self.bin_info['extent'][0][1] + self.cfg_env.bin.pos[1], self.bin_info['extent'][1][1] + self.cfg_env.bin.pos[1]), height=self.cfg_env.table_height, file_path='table_with_hole.urdf')
+                table_asset = self.gym.load_asset(self.sim, ".", 'table_with_hole.urdf', table_options)
+
+            table_rigid_body_count = self.gym.get_asset_rigid_body_count(table_asset)
+            table_rigid_shape_count = self.gym.get_asset_rigid_shape_count(table_asset)
+
+
 
 
         if self.cfg_env.collision_boundaries.add_safety_walls:
@@ -504,10 +575,13 @@ class Ur5SihMultiObject(Ur5Sih):
             max_rigid_bodies += goal_rigid_body_count
             max_rigid_shapes += goal_rigid_shape_count
 
+            if self.cfg_env.table_height > 0.0:
+                max_rigid_bodies += table_rigid_body_count
+                max_rigid_shapes += table_rigid_shape_count
+
             if self.cfg_env.bin.asset != 'no_bin':
                 max_rigid_bodies += bin_rigid_body_count
                 max_rigid_shapes += bin_rigid_shape_count
-
 
             if self.cfg_env.collision_boundaries.add_safety_walls:
                 max_rigid_bodies += safety_walls_rigid_body_count
@@ -517,7 +591,6 @@ class Ur5SihMultiObject(Ur5Sih):
                 max_rigid_bodies += table_offset_rigid_body_count
                 max_rigid_shapes += table_offset_rigid_shape_count
 
-
             self.gym.begin_aggregate(env_ptr, max_rigid_bodies, max_rigid_shapes, True)
 
             # Create robot actor.
@@ -526,9 +599,14 @@ class Ur5SihMultiObject(Ur5Sih):
             self.ur5sih_actor_indices.append(actor_count)
             actor_count += 1
 
-            # Create cameras.
-            #for camera in self.camera_dict.values():
-            #    camera.connect_simulation(self.gym, self.sim, env_index, env_ptr, self.device, self.num_envs)
+            # Create table actor.
+            if self.cfg_env.table_height > 0.0:
+                if self.cfg_env.bin.asset == 'no_bin':
+                    table_pose = gymapi.Transform(p=gymapi.Vec3(0.2925, 0.38, self.cfg_env.table_height/2))
+                else:
+                    table_pose = gymapi.Transform(p=gymapi.Vec3(0., 0., self.cfg_env.table_height / 2))
+                table_handle = self.gym.create_actor(env_ptr, table_asset, table_pose, 'table', env_index, 0)
+                actor_count += 1
 
             # Create bin actor.
             if self.cfg_env.bin.asset != 'no_bin':
@@ -579,12 +657,14 @@ class Ur5SihMultiObject(Ur5Sih):
         self._set_object_collisions(object_ids, collision_filters=[0b001 for _ in range(len(object_ids))])
 
     def _enable_object_collisions(self, object_ids: List[int]):
-        if len(object_ids) > 31:
-            raise ValueError("Cannot have more than 32 objects in the environment.")
-        
-        OBJECT_COLLISION_FILTER = [2**(i + 1) for i in object_ids]
-        # Objects get non-overlapping biswise collision filters so they collide with each other. Robot collides with everything anyways, and the other things like an artificial collision boundary can now be tuned to collide with whatever is needed.
+        if len(object_ids) > 30:
+            raise ValueError("Cannot have more than 30 objects in the environment.")
 
+        if self.cfg_base.ros.activate:
+            OBJECT_COLLISION_FILTER = [0b001 for _ in object_ids]
+        else:
+            OBJECT_COLLISION_FILTER = [2**(i + 1) for i in object_ids]
+        # Objects get non-overlapping biswise collision filters so they collide with each other. Robot collides with everything anyways, and the other things like an artificial collision boundary can now be tuned to collide with whatever is needed.
         self._set_object_collisions(object_ids, collision_filters=OBJECT_COLLISION_FILTER)
 
     def _set_object_collisions(self, object_ids: List[int], collision_filters: List[int]) -> None:
@@ -634,7 +714,7 @@ class Ur5SihMultiObject(Ur5Sih):
 
     def visualize_workspace_extent(self) -> None:
         for env_id in range(self.num_envs):
-            bbox = gymutil.WireframeBBoxGeometry(torch.tensor(self.cfg_env.workspace), pose=gymapi.Transform(), color=(0, 1, 1))
+            bbox = gymutil.WireframeBBoxGeometry(self.workspace, pose=gymapi.Transform(), color=(0, 1, 1))
             gymutil.draw_lines(bbox, self.gym, self.viewer, self.env_ptrs[env_id], pose=gymapi.Transform())
 
     def _acquire_object_bounding_box(self) -> None:
@@ -686,14 +766,20 @@ class Ur5SihMultiObject(Ur5Sih):
         self.object_synthetic_pointcloud_ordered = self.object_surface_samples.clone()  # shape: (num_envs, num_objects_per_bin, max_num_points, 4)
         self.object_synthetic_pointcloud = torch.zeros((self.num_envs, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 4)).to(self.device)  # shape: (num_envs, num_objects_per_bin, max_num_points, 4)
 
-    def _refresh_object_synthetic_pointcloud(self) -> None:
-        object_pos_expanded = self.object_pos.unsqueeze(2).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 1)
-        object_quat_expanded = self.object_quat.unsqueeze(2).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 1)
+    def _refresh_object_synthetic_pointcloud(self, relative: bool = False) -> None:
+        object_pos = self.object_pos
+        object_quat = self.object_quat
+
+        object_pos_expanded = object_pos.unsqueeze(2).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 1)
+        object_quat_expanded = object_quat.unsqueeze(2).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 1)
 
         self.object_synthetic_pointcloud_ordered[:, :, :, 0:3] = object_pos_expanded + quat_apply(object_quat_expanded, self.object_surface_samples[:, :, :, 0:3])
 
-        self.object_synthetic_pointcloud_ordered[..., 0:3] *= self.object_synthetic_pointcloud_ordered[..., 3:].repeat(1, 1, 1, 3)  # Set points that are only padding to zero.
+        if relative:
+            self.object_synthetic_pointcloud_ordered[:, :, :, 0:3] -= self.ur5_flange_pose[:, 0:3].unsqueeze(1).unsqueeze(2).repeat(1, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 1)
+            self.object_synthetic_pointcloud_ordered[:, :, :, 0:3] = quat_apply(quat_conjugate(self.ur5_flange_pose[:, 3:7]).unsqueeze(1).unsqueeze(2).repeat(1, self.cfg_env.objects.num_objects, self.cfg_env.pointclouds.max_num_points, 1), self.object_synthetic_pointcloud_ordered[:, :, :, 0:3])
 
+        self.object_synthetic_pointcloud_ordered[..., 0:3] *= self.object_synthetic_pointcloud_ordered[..., 3:].repeat(1, 1, 1, 3)  # Set points that are only padding to zero.
         self.object_synthetic_pointcloud[:] = self.object_synthetic_pointcloud_ordered[:, :, torch.randperm(self.cfg_env.pointclouds.max_num_points), :]  # Randomly permute points.
     
     def _refresh_target_object_synthetic_pointcloud(self) -> None:
@@ -702,38 +788,12 @@ class Ur5SihMultiObject(Ur5Sih):
 
     def _refresh_target_object_synthetic_initial_pointcloud(self, env_ids) -> None:
         self.target_object_synthetic_initial_pointcloud[:] = self.object_synthetic_initial_pointcloud[torch.arange(self.num_envs), self.object_configuration_indices].gather(1, self.target_object_index.unsqueeze(1).unsqueeze(2).unsqueeze(3).repeat(1, 1, self.cfg_env.pointclouds.max_num_points, 4)).squeeze(1)
-        self.target_object_synthetic_initial_pointcloud[env_ids, ..., 3] *= PointType.INITIAL.value
+        self.target_object_synthetic_initial_pointcloud[env_ids, ..., 3] *= PointType.TARGET.value
 
-    def _acquire_robot_synthetic_pointcloud(self) -> None:
-        self.robot_body_env_indices = [self.gym.find_actor_rigid_body_index(self.env_ptrs[0], self.ur5sih_handles[0], body_name, gymapi.DOMAIN_ENV) for body_name in self.controller.body_areas.keys()]
-        self.robot_body_pos = self.body_pos[:, self.robot_body_env_indices, 0:3]
-        self.robot_body_quat = self.body_quat[:, self.robot_body_env_indices, 0:4]
-
-        self.robot_surface_samples = []
-        for body_index, body_mesh in enumerate(self.controller.body_meshes):
-            current_body_surface_samples = self.controller.body_surface_samples[body_index]
-            current_body_surface_samples = torch.from_numpy(current_body_surface_samples).to(self.device, dtype=torch.float32)
-            self.robot_surface_samples.append(current_body_surface_samples.unsqueeze(0).repeat(self.num_envs, 1, 1))
-
-        self.robot_synthetic_pointcloud = torch.zeros((self.num_envs, sum(self.controller.num_body_surface_samples), 4)).to(self.device)  # shape: (num_envs, num_robot_points, 4)
-        self.robot_synthetic_pointcloud[:, :, 3] = 1
-
-    def _refresh_robot_synthetic_pointcloud(self) -> None:
-        # Refresh robot body poses.
-        self.robot_body_pos[:] = self.body_pos[:, self.robot_body_env_indices, 0:3]
-        self.robot_body_quat[:] = self.body_quat[:, self.robot_body_env_indices, 0:4]
-
-        prev_index = 0
-        for body_index, num_samples in enumerate(self.controller.num_body_surface_samples):
-            self.robot_synthetic_pointcloud[:, prev_index:prev_index + num_samples, 0:3] = self.robot_body_pos[:, body_index].unsqueeze(1).repeat(1, num_samples, 1) + quat_apply(self.robot_body_quat[:, body_index].unsqueeze(1).repeat(1, num_samples, 1), self.robot_surface_samples[body_index])
-            prev_index += num_samples
-
-        # Check for in-workspace and set validity.
-        is_valid = self.robot_synthetic_pointcloud[:, :, 0] >= self.cfg_env.workspace[0][0]
-        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 0] <= self.cfg_env.workspace[1][0])
-        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 1] >= self.cfg_env.workspace[0][1])
-        is_valid = torch.logical_and(is_valid, self.robot_synthetic_pointcloud[:, :, 1] <= self.cfg_env.workspace[1][1])
-        self.robot_synthetic_pointcloud[:, :, 3] = is_valid.float()
+    def _refresh_relative_goal_synthetic_pointcloud(self) -> None:
+        self.relative_goal_pos[:] = self.goal_pos
+        self.relative_goal_pos[:] -= self.ur5_flange_pose[:, 0:3]
+        self.relative_goal_pos[:] = quat_apply(quat_conjugate(self.ur5_flange_pose[:, 3:7]), self.relative_goal_pos)
 
     def _acquire_table_synthetic_pointcloud(self, num_samples: int) -> None:
         self.table_synthetic_pointcloud = torch.zeros((self.num_envs, num_samples, 4)).to(self.device)
@@ -752,12 +812,8 @@ class Ur5SihMultiObject(Ur5Sih):
 
     
     def _refresh_segmented_pointcloud(self, camera_name: str, tensor_name: str, target_segmentation_id: torch.Tensor, pointcloud_id: int = 1) -> None:
-        segmentation = self.camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION].flatten(1, 2)
-        pointcloud = self.camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].clone().detach().flatten(1, 2)
-
-        # Segmentation gets a semantic value of 2 compared to the base value of 1.
-        #pointcloud[:, :, 3] = torch.where(pointcloud[:, :, 3] > 0.5, pointcloud_id, 0)
-        #pointcloud[:, :, 3] *= self._target_semantic_id
+        segmentation = self._camera_dict[camera_name].current_sensor_observation[ImageType.SEGMENTATION].flatten(1, 2)
+        pointcloud = self._camera_dict[camera_name].current_sensor_observation[ImageType.POINTCLOUD].clone().detach().flatten(1, 2)
   
         segmented_pointclouds = []
         for env_index in range(self.num_envs):

@@ -46,14 +46,15 @@ class Ur5SihMultiObjectManipulation(Ur5SihMultiObject):
             for attribute in dir(self):
                 if attribute.startswith("object_") and isinstance(getattr(self, attribute), torch.Tensor) and "initial" not in attribute and not attribute == "object_configuration_indices":
                     if attribute.endswith("_pointcloud"):
-                        getattr(self, attribute[:-10] + "initial_pointcloud")[:] = torch.stack(getattr(self, attribute + "_initial_list"), dim=1)
+                        if hasattr(self, attribute[:-10] + "initial_pointcloud"):
+                            getattr(self, attribute[:-10] + "initial_pointcloud")[:] = torch.stack(getattr(self, attribute + "_initial_list"), dim=1)
                     elif attribute.endswith("_pointcloud_ordered"):
                         continue
                     else:
                         setattr(self, attribute + "_initial", torch.stack(getattr(self, attribute + "_initial_list"), dim=1))
                     getattr(self, attribute + "_initial_list").clear()
 
-                    if "pointcloud" in attribute:
+                    if "pointcloud" in attribute and hasattr(self, attribute[:-10] + "initial_pointcloud"):
                         getattr(self, attribute[:-10] + "initial_pointcloud")[..., 3] *= PointType.INITIAL.value
 
             self.objects_dropped = True

@@ -1,0 +1,64 @@
+name: StretchMultiObjectManipulation
+
+physics_engine: ${..physics_engine}
+full_experiment_name: ${..experiment}
+#test: ${..test}
+
+
+sim:
+    use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
+    up_axis: "z"
+    dt: 0.016666667  # required, but overridden in DexterityBase.yaml
+    gravity: [0.0, 0.0, -9.81]  # required, but overridden in base DexterityBase.yaml
+    disable_gravity: False
+    #contact_collection: 0
+
+env:
+    enableCameraSensors: True  # Set to true to test visual observations
+    numEnvs: ${resolve_default:16384,${...num_envs}}
+    numObservations: 1  # overwritten depending on observations
+    numActions: 1  # overwritten depending on robot configuration
+    controlFrequencyInv: 3
+    renderFPS: 60
+    
+    proprioceptive_observations: ['stretch_fingertip_pos', 'stretch_fingertip_linvel', 'dof_position_targets']
+    object_observations: ['object_pos', 'object_bounding_box', 'target_object_bounding_box' ]
+    task_observations: ['stretch_fingertip_to_target_object_pos',  'target_object_to_goal_pos', 'frontview_color']
+
+    observations: ${merge_lists:${.proprioceptive_observations},${.object_observations},${.task_observations}}
+
+    actions: ['stretch_relative_joint_pos']
+
+rl:
+    # Possible goals are ['lift', 'reposition', 'repose', 'place', 'throw']
+    # 'lift' requires the policy to move the object to a height of 0.3m.
+    # 'reposition' requires the policy to move the object to a different position.
+    # 'oriented_reposition' requires the policy to move the object to a different position and achieve a specific orientation of the robot hand relative to the object, for example, held from above, held from the left, etc..
+    # 'throw' requires the policy to throw the object into a target bin.
+    goal: 'reposition'
+    goal_threshold: 0.05
+    
+
+    reward:
+        # Task rewards.
+        reaching: 1.0
+        lifting: 5.0
+        goal: 50.0
+        success: 50.0
+
+        # Safety rewards.
+        #dof_velocity_penalty: 1.0
+        #collision_penalty: 0.1
+
+    lifting_threshold: 0.05
+
+
+    reset:
+        max_episode_length: 400
+        reset_reached_goal: False
+
+    randomize: True
+    randomization_params:
+        object_disturbance:
+            probability: 0.2
+            magnitude: 15.0

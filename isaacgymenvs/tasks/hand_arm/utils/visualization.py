@@ -39,7 +39,7 @@ def visualize_pos(gym, viewer, env_ptrs, get_pos: Callable[[],torch.Tensor], mar
                 if marker == "axis":
                     geom = gymutil.AxesGeometry(size)
                 elif marker == "sphere":
-                    geom = gymutil.WireframeSphereGeometry(size, 4, 4)
+                    geom = gymutil.WireframeSphereGeometry(size, 2, 2)
                 elif marker == "cube":
                     geom = gymutil.WireframeBoxGeometry(size, size, size)
                 else:
@@ -107,8 +107,9 @@ def visualize_depth_image(
     env_indices: Sequence[int] = (0,),
     max_depth: float = 2.0
     ) -> None:
-    color_image = ((-depth_image / max_depth).clip(0.0, 1.0) * 255).astype(np.uint8)
-    visualize_color_image(color_image, window_name, env_indices)
+    depth_image = get_depth_image()
+    color_image = ((-depth_image / max_depth).clip(0.0, 1.0) * 255).to(torch.uint8)
+    visualize_color_image(gym, viewer, env_ptrs, lambda: color_image, window_name, env_indices)
 
 
 def visualize_segmentation_image(

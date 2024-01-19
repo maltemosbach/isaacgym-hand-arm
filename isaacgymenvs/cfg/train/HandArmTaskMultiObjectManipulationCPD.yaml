@@ -13,6 +13,8 @@ params:
     horizon_length: 8  # Number of steps to run before updating the policy.
     mini_epochs: 2  # Number of mini_epochs of updates to perform.
 
+    #normalize_input: False
+
   # Overwrite network configuration to differentiate student architecture from teacher architecture.
   network:
       name: pointcloud_actor  # Employ CPD ActorNetwork
@@ -22,9 +24,11 @@ params:
 
       pointcloud:
         normalize: False
-        encoder: "minkowski_fcnn"
+        encoder: "minkowski_impala"
         embed_size: 256
         processing_mode: "merge"  # Possible values: merge, shared_encoder, separate_encoders
+
+        auxillary_objectives: ['fingertip_pos', 'target_object_pos']
 
       space:
         continuous:
@@ -70,11 +74,11 @@ params:
     load_path: ${....teacher_checkpoint}
 
   dataset:
-    train_valid_split: 0.95
+    train_valid_split: 0.9
 
     train:
-      capacity: 3000001
-      minibatch_size: 256
+      capacity: 5000001
+      minibatch_size: 512 #64
       sequence_len: 1
 
     validation:
