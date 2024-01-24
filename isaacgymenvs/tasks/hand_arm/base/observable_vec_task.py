@@ -42,7 +42,7 @@ class ObservableVecTask(VecTask):
             for camera_name, camera_cfg in self.cfg_env.cameras.items():
                 image_types = []
                 for observation_name in (self.cfg["env"]["observations"] + self.cfg["env"]["teacher_observations"] if "teacher_observations" in self.cfg["env"].keys() else self.cfg["env"]["observations"]):
-                   if observation_name.startswith(camera_name):
+                    if observation_name.startswith(camera_name):
                         image_types.append(observation_name.split("_")[-1])
 
                         #if "target" in observation_name:

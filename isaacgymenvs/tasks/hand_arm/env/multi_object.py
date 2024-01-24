@@ -4,6 +4,7 @@ from isaacgymenvs.tasks.hand_arm.base.ur5sih import Ur5Sih
 from isaacgymenvs.tasks.hand_arm.utils.camera import PointType, ImageType
 from isaacgymenvs.tasks.hand_arm.utils.observables import Observable, LowDimObservable, PosObservable, PoseObservable, BoundingBoxObservable, SyntheticPointcloudObservable
 from isaacgymenvs.tasks.hand_arm.utils.callbacks import ObservableCallback
+from isaacgymenvs.tasks.hand_arm.utils.transforms import InvervalSample
 from isaacgymenvs. tasks.hand_arm.utils.urdf import generate_table_with_hole
 import hydra
 from omegaconf import DictConfig
@@ -304,6 +305,28 @@ class Ur5SihMultiObject(Ur5Sih):
                     post_reset=self._refresh_target_object_synthetic_initial_pointcloud,
                 ),
                 requires=["object_synthetic_initial_pointcloud"],
+            )
+        )
+        self.register_observable(
+            PosObservable(
+                name="target_object_invterval_pos",
+                get_state=lambda: self.target_object_interval_pos,
+                callback=ObservableCallback(
+                    post_init=lambda: (setattr(self, "target_object_pos_interval_corrupter", InvervalSample(interval=4)), setattr(self, "target_object_interval_pos", self.target_object_pos_interval_corrupter(self.target_object_pos))),
+                    post_step=lambda: self.target_object_interval_pos.copy_(self.target_object_pos_interval_corrupter(self.target_object_pos)),
+                )
+            )
+        )
+        self.register_observable(
+            SyntheticPointcloudObservable(
+                name="target_object_synthetic_interval_pointcloud",
+                size=(self.cfg_env.pointclouds.max_num_points, 4),
+                get_state=lambda: self.target_object_synthetic_interval_pointcloud,
+                callback=ObservableCallback(
+                    post_init=lambda: (setattr(self, "target_object_synthetic_pointcloud_interval_corrupter", InvervalSample(interval=4)), setattr(self, "target_object_synthetic_interval_pointcloud", self.target_object_synthetic_pointcloud_interval_corrupter(self.target_object_synthetic_pointcloud))),
+                    post_step=lambda: self.target_object_synthetic_interval_pointcloud.copy_(self.target_object_synthetic_pointcloud_interval_corrupter(self.target_object_synthetic_pointcloud)),
+                ),
+                requires=["target_object_synthetic_pointcloud"],
             )
         )
 
